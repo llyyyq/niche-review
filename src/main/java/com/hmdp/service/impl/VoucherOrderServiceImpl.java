@@ -4,13 +4,16 @@ import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.VoucherOrder;
+import com.hmdp.entity.VoucherOrderCreateResult;
 import com.hmdp.mapper.VoucherOrderMapper;
+import com.hmdp.service.IOrderTimeoutTaskService;
 import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
 import com.hmdp.utils.RedisIdWorker;
 import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.rocketmq.client.producer.SendResult;
+import org.apache.rocketmq.client.producer.SendStatus;
 import org.apache.rocketmq.spring.core.RocketMQTemplate;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -23,10 +26,9 @@ import java.time.LocalDateTime;
 import java.util.Collections;
 
 import static com.hmdp.utils.MqConstants.ORDER_PAYMENT_TIMEOUT_MILLIS;
-import static com.hmdp.utils.MqConstants.ORDER_TIMEOUT_TOPIC;
 import static com.hmdp.utils.MqConstants.VOUCHER_ORDER_TOPIC;
 import static com.hmdp.utils.RedisConstants.SECKILL_ORDER_KEY;
-import static com.hmdp.utils.RedisConstants.SECKILL_STOCK_KEY;
+import static com.hmdp.utils.RedisConstants.SECKILL_RESERVATION_KEY;
 
 @Slf4j
 @Service
@@ -44,12 +46,31 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     private RocketMQTemplate rocketMQTemplate;
 
+    @Resource
+    private IOrderTimeoutTaskService orderTimeoutTaskService;
+
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
+    private static final DefaultRedisScript<Long> SECKILL_ROLLBACK_SCRIPT;
+    private static final DefaultRedisScript<Long> SECKILL_DUPLICATE_USER_RECONCILE_SCRIPT;
+    private static final DefaultRedisScript<Long> SECKILL_CLOSE_ORDER_SCRIPT;
 
     static {
         SECKILL_SCRIPT = new DefaultRedisScript<>();
         SECKILL_SCRIPT.setLocation(new ClassPathResource("seckill.lua"));
         SECKILL_SCRIPT.setResultType(Long.class);
+
+        SECKILL_ROLLBACK_SCRIPT = new DefaultRedisScript<>();
+        SECKILL_ROLLBACK_SCRIPT.setLocation(new ClassPathResource("seckill_rollback.lua"));
+        SECKILL_ROLLBACK_SCRIPT.setResultType(Long.class);
+
+        SECKILL_DUPLICATE_USER_RECONCILE_SCRIPT = new DefaultRedisScript<>();
+        SECKILL_DUPLICATE_USER_RECONCILE_SCRIPT.setLocation(
+                new ClassPathResource("seckill_duplicate_user_reconcile.lua"));
+        SECKILL_DUPLICATE_USER_RECONCILE_SCRIPT.setResultType(Long.class);
+
+        SECKILL_CLOSE_ORDER_SCRIPT = new DefaultRedisScript<>();
+        SECKILL_CLOSE_ORDER_SCRIPT.setLocation(new ClassPathResource("seckill_close_order.lua"));
+        SECKILL_CLOSE_ORDER_SCRIPT.setResultType(Long.class);
     }
 
     @Override
@@ -61,7 +82,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 SECKILL_SCRIPT,
                 Collections.emptyList(),
                 voucherId.toString(),
-                userId.toString()
+                userId.toString(),
+                String.valueOf(orderId)
         );
 
         int r = result == null ? 1 : result.intValue();
@@ -77,23 +99,18 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         String message = JSONUtil.toJsonStr(voucherOrder);
         try {
             SendResult sendResult = rocketMQTemplate.syncSend(VOUCHER_ORDER_TOPIC, message);
+            if (sendResult == null || sendResult.getSendStatus() != SendStatus.SEND_OK) {
+                throw new IllegalStateException("Voucher order message was not accepted by RocketMQ");
+            }
             log.info("Voucher order message sent, sendStatus={}, order={}", sendResult.getSendStatus(), message);
         } catch (Exception e) {
             log.error("Failed to send voucher order message, rollback Redis reservation. orderId={}, voucherId={}, userId={}",
                     orderId, voucherId, userId, e);
-            rollbackSeckillReservation(voucherId, userId);
+            boolean compensated = compensateSeckillReservation(voucherId, userId, orderId);
+            if (!compensated) {
+                log.error("Failed to compensate Redis reservation after producer send failure, orderId={}", orderId);
+            }
             return Result.fail("系统繁忙，请稍后重试");
-        }
-
-        try {
-            rocketMQTemplate.syncSendDelayTimeMills(
-                    ORDER_TIMEOUT_TOPIC,
-                    String.valueOf(orderId),
-                    ORDER_PAYMENT_TIMEOUT_MILLIS
-            );
-            log.info("Order timeout message sent, orderId={}, delayMillis={}", orderId, ORDER_PAYMENT_TIMEOUT_MILLIS);
-        } catch (Exception e) {
-            log.error("Failed to send order timeout message, orderId={}", orderId, e);
         }
 
         return Result.ok(orderId);
@@ -131,27 +148,72 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             throw new RuntimeException("Failed to rollback MySQL voucher stock, orderId=" + orderId);
         }
 
-        rollbackSeckillReservation(order.getVoucherId(), order.getUserId());
+        releaseClosedOrderReservation(order.getVoucherId(), order.getUserId());
         log.info("Timeout order closed, orderId={}, voucherId={}, userId={}",
                 orderId, order.getVoucherId(), order.getUserId());
     }
 
-    private void rollbackSeckillReservation(Long voucherId, Long userId) {
-        String stockKey = SECKILL_STOCK_KEY + voucherId;
-        String orderKey = SECKILL_ORDER_KEY + voucherId;
-        stringRedisTemplate.opsForValue().increment(stockKey, 1);
-        stringRedisTemplate.opsForSet().remove(orderKey, userId.toString());
-        log.info("Redis seckill reservation rolled back, voucherId={}, userId={}", voucherId, userId);
+    @Override
+    public boolean compensateSeckillReservation(Long voucherId, Long userId, Long orderId) {
+        Long result = stringRedisTemplate.execute(
+                SECKILL_ROLLBACK_SCRIPT,
+                Collections.emptyList(),
+                String.valueOf(voucherId),
+                String.valueOf(userId),
+                String.valueOf(orderId)
+        );
+        if (Long.valueOf(1L).equals(result)) {
+            log.info("Redis seckill reservation compensated, orderId={}, voucherId={}, userId={}",
+                    orderId, voucherId, userId);
+            return true;
+        }
+
+        Boolean reservationExists = stringRedisTemplate.hasKey(SECKILL_RESERVATION_KEY + orderId);
+        Boolean userOrderMarked = stringRedisTemplate.opsForSet()
+                .isMember(SECKILL_ORDER_KEY + voucherId, String.valueOf(userId));
+        boolean alreadyCompensated = Boolean.FALSE.equals(reservationExists)
+                && Boolean.FALSE.equals(userOrderMarked);
+        if (alreadyCompensated) {
+            log.info("Redis seckill reservation was already compensated, orderId={}", orderId);
+            return true;
+        }
+
+        log.error("Redis seckill reservation compensation did not take effect, orderId={}, voucherId={}, userId={}, reservationExists={}, userOrderMarked={}",
+                orderId, voucherId, userId, reservationExists, userOrderMarked);
+        return false;
+    }
+
+    private void reconcileDuplicateUserReservation(Long voucherId, Long userId, Long orderId) {
+        Long result = stringRedisTemplate.execute(
+                SECKILL_DUPLICATE_USER_RECONCILE_SCRIPT,
+                Collections.emptyList(),
+                String.valueOf(voucherId),
+                String.valueOf(userId),
+                String.valueOf(orderId)
+        );
+        if (Long.valueOf(1L).equals(result)) {
+            log.warn("Reconciled Redis reservation for an existing user voucher order, orderId={}, voucherId={}, userId={}",
+                    orderId, voucherId, userId);
+        }
+    }
+
+    private void releaseClosedOrderReservation(Long voucherId, Long userId) {
+        stringRedisTemplate.execute(
+                SECKILL_CLOSE_ORDER_SCRIPT,
+                Collections.emptyList(),
+                String.valueOf(voucherId),
+                String.valueOf(userId)
+        );
     }
 
     @Override
     @Transactional
-    public void voucherOrder(VoucherOrder voucherOrder) {
+    public VoucherOrderCreateResult voucherOrder(VoucherOrder voucherOrder) {
         VoucherOrder oldOrder = getById(voucherOrder.getId());
         if (oldOrder != null) {
             log.info("Duplicate voucher order message ignored, orderId={}, userId={}, voucherId={}",
                     voucherOrder.getId(), voucherOrder.getUserId(), voucherOrder.getVoucherId());
-            return;
+            return VoucherOrderCreateResult.DUPLICATE_ORDER_ID;
         }
 
         Long userId = voucherOrder.getUserId();
@@ -163,7 +225,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         if (count > 0) {
             log.info("User already has voucher order, ignore duplicate message. userId={}, voucherId={}",
                     userId, voucherOrder.getVoucherId());
-            return;
+            reconcileDuplicateUserReservation(
+                    voucherOrder.getVoucherId(), userId, voucherOrder.getId());
+            return VoucherOrderCreateResult.DUPLICATE_USER_VOUCHER;
         }
 
         boolean success = seckillVoucherService
@@ -183,7 +247,13 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             throw new RuntimeException("Failed to save voucher order, orderId=" + voucherOrder.getId());
         }
 
+        orderTimeoutTaskService.createPendingTask(
+                voucherOrder.getId(),
+                LocalDateTime.now().plusSeconds(ORDER_PAYMENT_TIMEOUT_MILLIS / 1000L)
+        );
+
         log.info("Voucher order created, orderId={}, userId={}, voucherId={}",
                 voucherOrder.getId(), userId, voucherOrder.getVoucherId());
+        return VoucherOrderCreateResult.CREATED;
     }
 }

@@ -1282,4 +1282,127 @@ CREATE TABLE `tb_voucher_order`  (
 -- Records of tb_voucher_order
 -- ----------------------------
 
+-- ----------------------------
+-- Table structure for tb_ai_conversation
+-- ----------------------------
+DROP TABLE IF EXISTS `tb_ai_conversation`;
+CREATE TABLE `tb_ai_conversation` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'primary key',
+  `user_id` bigint unsigned NOT NULL COMMENT 'conversation owner',
+  `title` varchar(128) NOT NULL COMMENT 'conversation title',
+  `summary` mediumtext COMMENT 'compressed history for future context',
+  `summary_up_to_message_id` bigint unsigned DEFAULT NULL COMMENT 'last message included in summary',
+  `last_message_at` timestamp NULL DEFAULT NULL COMMENT 'last activity time',
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'create time',
+  `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'update time',
+  PRIMARY KEY (`id`),
+  KEY `idx_ai_conversation_user_last` (`user_id`, `last_message_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI conversations';
+
+-- ----------------------------
+-- Table structure for tb_ai_message
+-- ----------------------------
+DROP TABLE IF EXISTS `tb_ai_message`;
+CREATE TABLE `tb_ai_message` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'primary key',
+  `conversation_id` bigint unsigned NOT NULL COMMENT 'conversation id',
+  `user_id` bigint unsigned NOT NULL COMMENT 'conversation owner',
+  `role` tinyint unsigned NOT NULL COMMENT '1 user, 2 assistant, 3 system',
+  `content` mediumtext NOT NULL COMMENT 'message content',
+  `status` tinyint unsigned NOT NULL DEFAULT 1 COMMENT '0 generating, 1 completed, 2 failed',
+  `input_tokens` int unsigned DEFAULT NULL COMMENT 'model input tokens',
+  `output_tokens` int unsigned DEFAULT NULL COMMENT 'model output tokens',
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'create time',
+  `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'update time',
+  PRIMARY KEY (`id`),
+  KEY `idx_ai_message_conversation_id_id` (`conversation_id`, `id`),
+  KEY `idx_ai_message_user_id` (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI conversation messages';
+
 SET FOREIGN_KEY_CHECKS = 1;
+
+-- ----------------------------
+-- Table structure for tb_ai_tool_log
+-- ----------------------------
+DROP TABLE IF EXISTS `tb_ai_tool_log`;
+CREATE TABLE `tb_ai_tool_log` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'primary key',
+  `conversation_id` bigint unsigned NOT NULL COMMENT 'conversation id',
+  `user_id` bigint unsigned NOT NULL COMMENT 'conversation owner',
+  `tool_name` varchar(64) NOT NULL COMMENT 'read-only business tool name',
+  `request_content` mediumtext COMMENT 'sanitized tool request summary',
+  `result_content` mediumtext COMMENT 'sanitized tool result summary',
+  `success` tinyint unsigned NOT NULL COMMENT '1 success, 0 failure',
+  `duration_ms` bigint unsigned NOT NULL COMMENT 'tool execution duration in milliseconds',
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'create time',
+  PRIMARY KEY (`id`),
+  KEY `idx_ai_tool_log_conversation_id` (`conversation_id`, `id`),
+  KEY `idx_ai_tool_log_user_id` (`user_id`, `create_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI read-only tool invocation logs';
+
+-- ----------------------------
+-- Table structure for tb_ai_request_log
+-- ----------------------------
+DROP TABLE IF EXISTS `tb_ai_request_log`;
+CREATE TABLE `tb_ai_request_log` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'primary key',
+  `conversation_id` bigint unsigned DEFAULT NULL COMMENT 'conversation id',
+  `user_id` bigint unsigned DEFAULT NULL COMMENT 'conversation owner',
+  `assistant_message_id` bigint unsigned DEFAULT NULL COMMENT 'generated assistant message id',
+  `request_type` varchar(32) NOT NULL COMMENT 'chat or summary',
+  `provider` varchar(64) DEFAULT NULL COMMENT 'AI provider identifier',
+  `model` varchar(128) DEFAULT NULL COMMENT 'model identifier',
+  `retrieval_ms` bigint unsigned DEFAULT NULL COMMENT 'RAG retrieval duration',
+  `tool_ms` bigint unsigned DEFAULT NULL COMMENT 'business-tool duration',
+  `first_token_ms` bigint unsigned DEFAULT NULL COMMENT 'time to first streamed token',
+  `total_ms` bigint unsigned NOT NULL COMMENT 'model request duration',
+  `input_tokens` int unsigned DEFAULT NULL COMMENT 'estimated input tokens',
+  `output_tokens` int unsigned DEFAULT NULL COMMENT 'estimated output tokens',
+  `success` tinyint unsigned NOT NULL COMMENT '1 success, 0 failure',
+  `error_message` varchar(512) DEFAULT NULL COMMENT 'sanitized failure reason',
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'create time',
+  PRIMARY KEY (`id`),
+  KEY `idx_ai_request_log_conversation_id` (`conversation_id`, `id`),
+  KEY `idx_ai_request_log_user_id` (`user_id`, `create_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI request observability logs';
+
+-- ----------------------------
+-- Table structure for tb_ai_knowledge_sync_task
+-- ----------------------------
+DROP TABLE IF EXISTS `tb_ai_knowledge_sync_task`;
+CREATE TABLE `tb_ai_knowledge_sync_task` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'primary key',
+  `shop_id` bigint unsigned NOT NULL COMMENT 'shop whose knowledge must be synchronized',
+  `status` tinyint unsigned NOT NULL DEFAULT 0 COMMENT '0 pending, 1 processing, 2 succeeded, 3 failed',
+  `retry_count` int unsigned NOT NULL DEFAULT 0 COMMENT 'number of attempted synchronizations',
+  `next_retry_at` timestamp NULL DEFAULT NULL COMMENT 'next scheduled attempt',
+  `processing_at` timestamp NULL DEFAULT NULL COMMENT 'claim time for timeout recovery',
+  `last_error` varchar(512) DEFAULT NULL COMMENT 'last synchronization failure',
+  `version` bigint unsigned NOT NULL DEFAULT 0 COMMENT 'change version to avoid losing concurrent updates',
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'create time',
+  `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'update time',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_knowledge_sync_task_shop_id` (`shop_id`),
+  KEY `idx_ai_knowledge_sync_task_due` (`status`, `next_retry_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Durable retry tasks for AI knowledge synchronization';
+
+-- ----------------------------
+-- Table structure for tb_order_timeout_task
+-- ----------------------------
+DROP TABLE IF EXISTS `tb_order_timeout_task`;
+CREATE TABLE `tb_order_timeout_task` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'primary key',
+  `order_id` bigint unsigned NOT NULL COMMENT 'voucher order id',
+  `due_at` datetime NOT NULL COMMENT 'payment deadline',
+  `status` tinyint unsigned NOT NULL DEFAULT 0 COMMENT '0 pending, 1 processing, 2 sent, 3 cancelled',
+  `retry_count` int unsigned NOT NULL DEFAULT 0 COMMENT 'delivery attempts',
+  `next_retry_at` datetime NOT NULL COMMENT 'next delivery attempt',
+  `processing_at` datetime DEFAULT NULL COMMENT 'claim time for timeout recovery',
+  `last_error` varchar(512) DEFAULT NULL COMMENT 'last delivery error',
+  `version` bigint unsigned NOT NULL DEFAULT 0 COMMENT 'optimistic lock version',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'create time',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'update time',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_order_timeout_task_order_id` (`order_id`),
+  KEY `idx_order_timeout_task_due` (`status`, `next_retry_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Reliable delayed order-close delivery tasks';

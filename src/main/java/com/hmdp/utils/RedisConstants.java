@@ -9,6 +9,8 @@ public class RedisConstants {
     public static final Long CACHE_NULL_TTL = 2L;
 
     public static final Long CACHE_SHOP_TTL = 30L;
+    /** Random offset (minutes) used to spread normal shop-cache expiration. */
+    public static final Long CACHE_SHOP_TTL_RANDOM_MAX = 5L;
     public static final String CACHE_SHOP_KEY = "cache:shop:";
     public static final String SHOP_BLOOM_FILTER_KEY = "bf:shop:id";
     public static final String CACHE_SHOP_TYPE_KEY = "cache:shop:type";
@@ -17,6 +19,12 @@ public class RedisConstants {
 
     public static final String SECKILL_STOCK_KEY = "seckill:stock:";
     public static final String SECKILL_ORDER_KEY = "seckill:order:";
+    /**
+     * One short-lived marker for every successful Redis reservation. It lets
+     * compensation distinguish this order's reservation from an older order
+     * made by the same user for the same voucher.
+     */
+    public static final String SECKILL_RESERVATION_KEY = "seckill:reservation:";
     public static final String BLOG_LIKED_KEY = "blog:liked:";
     public static final String FEED_KEY = "feed:";
     public static final String SHOP_GEO_KEY = "shop:geo:";

@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS `tb_ai_request_log` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'primary key',
+  `conversation_id` bigint unsigned DEFAULT NULL COMMENT 'conversation id',
+  `user_id` bigint unsigned DEFAULT NULL COMMENT 'conversation owner',
+  `assistant_message_id` bigint unsigned DEFAULT NULL COMMENT 'generated assistant message id',
+  `request_type` varchar(32) NOT NULL COMMENT 'chat or summary',
+  `provider` varchar(64) DEFAULT NULL COMMENT 'AI provider identifier',
+  `model` varchar(128) DEFAULT NULL COMMENT 'model identifier',
+  `retrieval_ms` bigint unsigned DEFAULT NULL COMMENT 'RAG retrieval duration',
+  `tool_ms` bigint unsigned DEFAULT NULL COMMENT 'business-tool duration',
+  `first_token_ms` bigint unsigned DEFAULT NULL COMMENT 'time to first streamed token',
+  `total_ms` bigint unsigned NOT NULL COMMENT 'model request duration',
+  `input_tokens` int unsigned DEFAULT NULL COMMENT 'estimated input tokens',
+  `output_tokens` int unsigned DEFAULT NULL COMMENT 'estimated output tokens',
+  `success` tinyint unsigned NOT NULL COMMENT '1 success, 0 failure',
+  `error_message` varchar(512) DEFAULT NULL COMMENT 'sanitized failure reason',
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'create time',
+  PRIMARY KEY (`id`),
+  KEY `idx_ai_request_log_conversation_id` (`conversation_id`, `id`),
+  KEY `idx_ai_request_log_user_id` (`user_id`, `create_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI request observability logs';

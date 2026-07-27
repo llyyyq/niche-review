@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0">
+  <title>小众 AI 助手</title>
+  <link rel="stylesheet" href="./css/element.css">
+  <link rel="stylesheet" href="./css/main.css">
+  <link rel="stylesheet" href="./css/ai-chat.css">
+</head>
+<body>
+<div id="app" class="ai-app">
+  <header class="ai-header">
+    <button class="icon-button" title="返回首页" @click="goHome"><i class="el-icon-arrow-left"></i></button>
+    <div class="assistant-identity">
+      <img class="assistant-avatar" src="/imgs/ai-assistant.png" alt="小众 AI 助手">
+      <div>
+        <div class="assistant-name">小众 AI</div>
+        <div class="assistant-status"><span></span>本地生活助手</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button class="icon-button location-button" :class="{ 'location-ready': locationEnabled }" :title="locationTitle" @click="toggleLocation"><i class="el-icon-location-outline"></i></button>
+      <button class="icon-button" title="会话历史" @click="historyVisible = true"><i class="el-icon-tickets"></i></button>
+      <button class="icon-button" title="新建会话" @click="createConversation"><i class="el-icon-plus"></i></button>
+    </div>
+  </header>
+
+  <main ref="messageList" class="message-list">
+    <section v-if="!messages.length" class="empty-chat">
+      <img src="/imgs/ai-assistant.png" alt="">
+      <h1>今天想去哪里？</h1>
+      <p>告诉我人数、预算、口味或位置，我来帮你想想。</p>
+      <div class="suggestion-list">
+        <button v-for="suggestion in suggestions" :key="suggestion" @click="useSuggestion(suggestion)">{{suggestion}}</button>
+      </div>
+    </section>
+
+    <article v-for="message in messages" :key="message.id" class="message-row" :class="message.role === 1 ? 'message-user' : 'message-assistant'">
+      <img v-if="message.role !== 1" class="message-avatar" src="/imgs/ai-assistant.png" alt="">
+      <div class="message-content">
+        <div class="message-bubble" :class="{ 'is-generating': message.status === 0 }">{{message.content}}</div>
+        <div v-if="message.status === 0" class="streaming-label"><i></i>正在思考</div>
+        <div v-if="message.status === 2" class="message-error">回复生成失败，请重新发送。</div>
+      </div>
+    </article>
+  </main>
+
+  <footer class="composer">
+    <textarea v-model="input" :disabled="sending" @keydown.enter.exact.prevent="sendMessage" placeholder="例如：两个人约会，人均 200，想找西湖附近的餐厅"></textarea>
+    <button class="send-button" :disabled="!canSend" title="发送" @click="sendMessage"><i class="el-icon-s-promotion"></i></button>
+  </footer>
+
+  <aside v-if="historyVisible" class="history-mask" @click.self="historyVisible = false">
+    <div class="history-panel">
+      <div class="history-header">
+        <span>会话历史</span>
+        <button class="icon-button" title="关闭" @click="historyVisible = false"><i class="el-icon-close"></i></button>
+      </div>
+      <button class="new-conversation" @click="createConversation"><i class="el-icon-plus"></i>新建会话</button>
+      <div class="conversation-list">
+        <div v-for="conversation in conversations" :key="conversation.id" class="conversation-row" :class="{active: conversation.id === conversationId}">
+          <button class="conversation-item" @click="selectConversation(conversation.id)">
+            <i class="el-icon-chat-round"></i><span>{{conversation.title}}</span>
+          </button>
+          <div class="conversation-actions">
+            <button class="conversation-action" title="修改会话标题" @click.stop="renameConversation(conversation)"><i class="el-icon-edit-outline"></i></button>
+            <button class="conversation-action danger" title="删除会话" @click.stop="deleteConversation(conversation)"><i class="el-icon-delete"></i></button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<script src="./js/vue.js"></script>
+<script src="./js/axios.min.js"></script>
+<script src="./js/element.js"></script>
+<script src="./js/common.js"></script>
+<script>
+  new Vue({
+    el: '#app',
+    data: {
+      conversations: [], conversationId: null, messages: [], input: '', sending: false,
+      location: {x: null, y: null}, locationEnabled: false,
+      historyVisible: false, streamController: null,
+      suggestions: ['推荐适合朋友聚餐的餐厅', '预算 200 元，周末约会去哪里', '附近有没有适合带孩子的餐厅']
+    },
+    computed: {
+      canSend() { return !this.sending && this.input.trim().length > 0; },
+      locationTitle() {
+        if (this.location.x === null) return '\u83b7\u53d6\u5f53\u524d\u4f4d\u7f6e';
+        return this.locationEnabled ? '\u5173\u95ed\u4f4d\u7f6e\u670d\u52a1' : '\u5f00\u542f\u4f4d\u7f6e\u670d\u52a1';
+      }
+    },
+    created() { this.restoreLocation(); this.loadConversations(true); },
+    beforeDestroy() {
+      if (this.streamController) this.streamController.abort();
+    },
+    methods: {
+      async loadConversations(selectFirst) {
+        try {
+          const result = await axios.get('/ai/conversations?current=1');
+          this.conversations = result.data || [];
+          if (selectFirst && this.conversations.length) await this.selectConversation(this.conversations[0].id, true);
+        } catch (error) { this.handleError(error); }
+      },
+      async createConversation() {
+        if (this.sending) return;
+        try {
+          const result = await axios.post('/ai/conversations', {});
+          this.conversations.unshift(result.data);
+          this.conversationId = result.data.id;
+          this.messages = [];
+          this.historyVisible = false;
+        } catch (error) { this.handleError(error); }
+      },
+      async selectConversation(conversationId, force) {
+        if (this.sending || (!force && conversationId === this.conversationId)) {
+          this.historyVisible = false;
+          return;
+        }
+        try {
+          const result = await axios.get('/ai/conversations/' + conversationId + '/messages');
+          this.conversationId = conversationId;
+          this.messages = result.data || [];
+          this.historyVisible = false;
+          this.scrollToBottom();
+        } catch (error) { this.handleError(error); }
+      },
+      async renameConversation(conversation) {
+        if (this.sending) return;
+        try {
+          const promptResult = await this.$prompt('请输入会话标题', '修改会话标题', {
+            inputValue: conversation.title,
+            inputPattern: /\S+/,
+            inputErrorMessage: '标题不能为空',
+            confirmButtonText: '保存',
+            cancelButtonText: '取消'
+          });
+          const title = promptResult.value.trim();
+          if (!title || title === conversation.title) return;
+          await axios.patch('/ai/conversations/' + conversation.id, {title: title});
+          conversation.title = title;
+          this.$message.success('会话标题已修改');
+        } catch (error) {
+          if (error !== 'cancel' && error !== 'close') this.handleError(error);
+        }
+      },
+      async deleteConversation(conversation) {
+        if (this.sending) return;
+        try {
+          await this.$confirm('删除后将无法恢复该会话及其消息记录，确定继续吗？', '删除会话', {
+            confirmButtonText: '删除',
+            cancelButtonText: '取消',
+            type: 'warning'
+          });
+          await axios.delete('/ai/conversations/' + conversation.id);
+          const wasSelected = this.conversationId === conversation.id;
+          this.conversations = this.conversations.filter(item => item.id !== conversation.id);
+          if (wasSelected) {
+            if (this.conversations.length) {
+              await this.selectConversation(this.conversations[0].id, true);
+            } else {
+              this.conversationId = null;
+              this.messages = [];
+            }
+          }
+          this.$message.success('会话已删除');
+        } catch (error) {
+          if (error !== 'cancel' && error !== 'close') this.handleError(error);
+        }
+      },
+      useSuggestion(suggestion) { this.input = suggestion; this.sendMessage(); },
+      async sendMessage() {
+        const content = this.input.trim();
+        if (!content || this.sending) return;
+        if (!this.conversationId) {
+          await this.createConversation();
+          if (!this.conversationId) return;
+        }
+
+        const location = await this.resolveLocationIfNeeded(content);
+        this.input = '';
+        this.sending = true;
+        const userMessage = {id: 'local-user-' + Date.now(), role: 1, content: content, status: 1};
+        const assistantMessage = {id: 'local-assistant-' + Date.now(), role: 2, content: '', status: 0};
+        this.messages.push(userMessage, assistantMessage);
+        this.scrollToBottom();
+        try {
+          await this.readChatStream(content, assistantMessage, location);
+          await this.loadMessages();
+          await this.loadConversations(false);
+        } catch (error) {
+          assistantMessage.status = 2;
+          if (!assistantMessage.content) assistantMessage.content = '暂时无法生成回复。';
+          this.handleError(error);
+        } finally {
+          this.sending = false;
+          this.streamController = null;
+          this.scrollToBottom();
+        }
+      },
+      async readChatStream(content, assistantMessage, location) {
+        const token = sessionStorage.getItem('token');
+        if (!token) {
+          location.href = '/login.html';
+          throw new Error('请先登录');
+        }
+        this.streamController = new AbortController();
+        const response = await fetch(util.commonURL + '/ai/conversations/' + this.conversationId + '/chat', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json', 'Authorization': token},
+          body: JSON.stringify({content: content, x: location.x, y: location.y}),
+          signal: this.streamController.signal
+        });
+        if (!response.ok || !response.body) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.errorMsg || '聊天请求失败');
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+        let finished = false;
+        while (!finished) {
+          const item = await reader.read();
+          if (item.done) break;
+          buffer += decoder.decode(item.value, {stream: true});
+          const chunks = buffer.split(/\r?\n\r?\n/);
+          buffer = chunks.pop();
+          for (let i = 0; i < chunks.length; i++) {
+            const event = this.parseSseEvent(chunks[i]);
+            if (!event) continue;
+            if (event.name === 'message_start') assistantMessage.id = event.data.messageId || assistantMessage.id;
+            if (event.name === 'delta') {
+              assistantMessage.content += event.data.content || '';
+              this.scrollToBottom();
+            }
+            if (event.name === 'message_end') {
+              assistantMessage.status = 1;
+              finished = true;
+            }
+            if (event.name === 'error') throw new Error(event.data.message || '聊天生成失败');
+          }
+        }
+      },
+      parseSseEvent(chunk) {
+        const lines = chunk.split(/\r?\n/);
+        const eventLine = lines.find(line => line.indexOf('event:') === 0);
+        const dataLine = lines.find(line => line.indexOf('data:') === 0);
+        if (!eventLine || !dataLine) return null;
+        try {
+          return {name: eventLine.substring(6).trim(), data: JSON.parse(dataLine.substring(5).trim())};
+        } catch (error) { return null; }
+      },
+      async resolveLocationIfNeeded(content) {
+        if (!this.locationEnabled || !this.hasNearbyIntent(content) || this.location.x === null) {
+          return {x: null, y: null};
+        }
+        return this.location;
+      },
+      async toggleLocation() {
+        if (this.location.x !== null) {
+          this.locationEnabled = !this.locationEnabled;
+          this.persistLocation();
+          this.$message.success(this.locationEnabled ? '\u5df2\u5f00\u542f\u4f4d\u7f6e\u670d\u52a1' : '\u5df2\u5173\u95ed\u4f4d\u7f6e\u670d\u52a1');
+          return;
+        }
+        await this.requestLocation(true);
+      },
+      async requestLocation(showFeedback) {
+        if (this.location.x !== null) {
+          if (showFeedback) this.$message.success('\u5df2\u83b7\u53d6\u5f53\u524d\u4f4d\u7f6e');
+          return true;
+        }
+        if (!navigator.geolocation) {
+          if (showFeedback) this.$message.warning('\u5f53\u524d\u6d4f\u89c8\u5668\u4e0d\u652f\u6301\u5b9a\u4f4d');
+          return false;
+        }
+        return new Promise(resolve => {
+          navigator.geolocation.getCurrentPosition(
+            position => {
+              this.location = {x: position.coords.longitude, y: position.coords.latitude};
+              this.locationEnabled = true;
+              this.persistLocation();
+              if (showFeedback) this.$message.success('\u5f53\u524d\u4f4d\u7f6e\u5df2\u83b7\u53d6');
+              resolve(true);
+            },
+            () => {
+              if (showFeedback) this.$message.warning('\u672a\u80fd\u83b7\u53d6\u5b9a\u4f4d\uff0c\u8bf7\u5728\u6d4f\u89c8\u5668\u4e2d\u5141\u8bb8\u4f4d\u7f6e\u6743\u9650');
+              resolve(false);
+            },
+            {enableHighAccuracy: false, timeout: 5000, maximumAge: 300000}
+          );
+        });
+      },
+      restoreLocation() {
+        try {
+          const stored = JSON.parse(sessionStorage.getItem('ai_chat_location'));
+          if (!stored || typeof stored.x !== 'number' || typeof stored.y !== 'number') return;
+          this.location = {x: stored.x, y: stored.y};
+          this.locationEnabled = stored.enabled === true;
+        } catch (error) {
+          sessionStorage.removeItem('ai_chat_location');
+        }
+      },
+      persistLocation() {
+        sessionStorage.setItem('ai_chat_location', JSON.stringify({
+          x: this.location.x,
+          y: this.location.y,
+          enabled: this.locationEnabled
+        }));
+      },
+      hasNearbyIntent(content) {
+        return /\u9644\u8fd1|\u8ddd\u79bb|\u5468\u8fb9|\u8fd1|nearby|near me|distance/i.test(content);
+      },
+      async loadMessages() {
+        const result = await axios.get('/ai/conversations/' + this.conversationId + '/messages');
+        this.messages = result.data || [];
+        this.scrollToBottom();
+      },
+      scrollToBottom() {
+        this.$nextTick(() => {
+          const container = this.$refs.messageList;
+          if (container) container.scrollTop = container.scrollHeight;
+        });
+      },
+      goHome() { location.href = '/'; },
+      handleError(error) {
+        this.$message.error(error && error.message ? error.message : String(error || '服务异常'));
+      }
+    }
+  });
+</script>
+</body>
+</html>

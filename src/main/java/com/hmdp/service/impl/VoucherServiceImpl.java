@@ -7,6 +7,8 @@ import com.hmdp.mapper.VoucherMapper;
 import com.hmdp.entity.SeckillVoucher;
 import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherService;
+import com.hmdp.event.ShopKnowledgeChangedEvent;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,6 +33,8 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     private ISeckillVoucherService seckillVoucherService;
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+    @Resource
+    private ApplicationEventPublisher applicationEventPublisher;
 
     @Override
     public Result queryVoucherOfShop(Long shopId) {
@@ -38,6 +42,20 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         List<Voucher> vouchers = getBaseMapper().queryVoucherOfShop(shopId);
         // 返回结果
         return Result.ok(vouchers);
+    }
+
+    @Override
+    public List<Voucher> listEnabledVouchersForKnowledge() {
+        return getBaseMapper().queryEnabledVouchers();
+    }
+
+    @Override
+    @Transactional
+    public void addVoucher(Voucher voucher) {
+        if (!save(voucher)) {
+            throw new IllegalStateException("Failed to save voucher");
+        }
+        publishKnowledgeChanged(voucher.getShopId());
     }
 
     @Override
@@ -54,5 +72,12 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         seckillVoucherService.save(seckillVoucher);
         // 保存秒杀库存到 Redis，供 seckill.lua 预扣库存使用
         stringRedisTemplate.opsForValue().set(SECKILL_STOCK_KEY + voucher.getId(), voucher.getStock().toString());
+        publishKnowledgeChanged(voucher.getShopId());
+    }
+
+    private void publishKnowledgeChanged(Long shopId) {
+        if (shopId != null) {
+            applicationEventPublisher.publishEvent(new ShopKnowledgeChangedEvent(shopId));
+        }
     }
 }

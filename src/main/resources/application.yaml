@@ -31,3 +31,37 @@ rocketmq:
   name-server: 127.0.0.1:9876
   producer:
     group: hmdp-producer-group
+
+ai:
+  chat:
+    provider: mock
+    stream-timeout-ms: 120000
+    context-message-limit: 6
+    system-prompt: "You are the Niche Review local-life assistant. Be concise and honest."
+  embedding:
+    provider: disabled
+    dimension: 1024
+  knowledge:
+    shop-collection: shop_knowledge
+    retrieve-limit: 3
+    rebuild-on-start: false
+    incremental-sync-enabled: true
+    sync-retry-max-attempts: 5
+    sync-retry-base-delay-seconds: 10
+    sync-retry-scan-delay-ms: 10000
+    sync-processing-timeout-seconds: 120
+    keyword-fallback-enabled: true
+    vector-min-score: 0.35
+    keyword-fallback-limit: 3
+  agent:
+    enabled: true
+    max-steps: 1
+    max-tools-per-step: 3
+    fast-path-enabled: true
+  memory:
+    summary-trigger-message-count: 12
+    max-summary-chars: 2400
+    max-summary-source-chars: 12000
+    max-recent-message-chars: 6000
+    max-knowledge-chars: 6000
+    max-tool-result-chars: 4000

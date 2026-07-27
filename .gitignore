@@ -54,10 +54,7 @@ application-local.yaml
 application-dev.yaml
 application-prod.yaml
 
-### frontend nginx package ###
-frontend/nginx-heimadianping/**
-!frontend/nginx-heimadianping/html/
-!frontend/nginx-heimadianping/html/hmdp/
-!frontend/nginx-heimadianping/html/hmdp/**
-frontend/nginx-heimadianping/html/hmdp/imgs/blogs/
+### frontend runtime uploads ###
+frontend/app/imgs/blogs/*
+!frontend/app/imgs/blogs/.gitkeep
 

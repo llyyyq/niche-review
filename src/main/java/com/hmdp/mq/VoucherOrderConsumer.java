@@ -2,6 +2,7 @@ package com.hmdp.mq;
 
 import cn.hutool.json.JSONUtil;
 import com.hmdp.entity.VoucherOrder;
+import com.hmdp.entity.VoucherOrderCreateResult;
 import com.hmdp.service.IVoucherOrderService;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.rocketmq.spring.annotation.RocketMQMessageListener;
@@ -20,7 +21,8 @@ import static com.hmdp.utils.MqConstants.VOUCHER_ORDER_TOPIC;
 @Component
 @RocketMQMessageListener(
         topic = VOUCHER_ORDER_TOPIC,
-        consumerGroup = VOUCHER_ORDER_CONSUMER_GROUP
+        consumerGroup = VOUCHER_ORDER_CONSUMER_GROUP,
+        maxReconsumeTimes = 5
 )
 public class VoucherOrderConsumer implements RocketMQListener<String> {
 
@@ -49,7 +51,11 @@ public class VoucherOrderConsumer implements RocketMQListener<String> {
                 throw new IllegalStateException("Failed to acquire user order lock, userId="
                         + userId + ", voucherId=" + voucherOrder.getVoucherId());
             }
-            voucherOrderService.voucherOrder(voucherOrder);
+            VoucherOrderCreateResult result = voucherOrderService.voucherOrder(voucherOrder);
+            if (result == VoucherOrderCreateResult.DUPLICATE_USER_VOUCHER) {
+                log.warn("Duplicate user/voucher message reconciled, orderId={}, userId={}, voucherId={}",
+                        voucherOrder.getId(), userId, voucherOrder.getVoucherId());
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("Interrupted while acquiring user order lock, userId=" + userId, e);

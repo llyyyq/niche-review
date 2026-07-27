@@ -10,6 +10,7 @@ import com.hmdp.entity.Blog;
 import com.hmdp.entity.Follow;
 import com.hmdp.entity.ScrollResult;
 import com.hmdp.entity.User;
+import com.hmdp.event.ShopKnowledgeChangedEvent;
 import com.hmdp.mapper.BlogMapper;
 import com.hmdp.service.IBlogService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
@@ -19,6 +20,7 @@ import com.hmdp.utils.SystemConstants;
 import com.hmdp.utils.UserHolder;
 import org.apache.tomcat.util.buf.StringUtils;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Service;
 
@@ -47,6 +49,8 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     private StringRedisTemplate stringRedisTemplate;
     @Resource
     private IFollowService followService;
+    @Resource
+    private ApplicationEventPublisher applicationEventPublisher;
     @Override
     public Result queryBlogById(Long id) {
         Blog blog = getById(id);
@@ -162,6 +166,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             String key = FEED_KEY + follow.getUserId();
             stringRedisTemplate.opsForZSet().add(key, blog.getId().toString(), System.currentTimeMillis());
         }
+        publishKnowledgeChanged(blog.getShopId());
         return Result.ok(blog.getId());
 
     }
@@ -207,5 +212,11 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         r.setOffset(os);
         // 封装并返回
         return Result.ok(r);
+    }
+
+    private void publishKnowledgeChanged(Long shopId) {
+        if (shopId != null) {
+            applicationEventPublisher.publishEvent(new ShopKnowledgeChangedEvent(shopId));
+        }
     }
 }

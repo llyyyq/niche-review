@@ -1,20 +1,22 @@
 package com.hmdp.service.impl;
 
-import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.Shop;
+import com.hmdp.event.ShopKnowledgeChangedEvent;
 import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.RedisData;
+import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.SystemConstants;
 import org.redisson.api.RBloomFilter;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.geo.Distance;
 import org.springframework.data.geo.GeoResult;
 import org.springframework.data.geo.GeoResults;
@@ -23,6 +25,10 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.domain.geo.GeoReference;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronizationAdapter;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.PostConstruct;
 
@@ -30,6 +36,7 @@ import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 import static com.hmdp.utils.RedisConstants.*;
@@ -44,10 +51,14 @@ import static com.hmdp.utils.RedisConstants.*;
  */
 @Service
 public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IShopService {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ShopServiceImpl.class);
+
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
     @Autowired
     private RedissonClient redissonClient;
+    @Autowired
+    private ApplicationEventPublisher applicationEventPublisher;
 
     private RBloomFilter<String> shopBloomFilter;
 
@@ -84,6 +95,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             return Result.fail("新增店铺失败");
         }
         shopBloomFilter.add(shop.getId().toString());
+        publishKnowledgeChanged(shop.getId());
         return Result.ok(shop.getId());
     }
     private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
@@ -109,24 +121,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         }
         //4.2 过期， 进行缓存重建
         // 5 缓存重建
-        // 5.1 获取锁
-        String lockKey = LOCK_SHOP_KEY + id;
-        // 5.2 判断获取锁是否成功
-        boolean isLock = tryLock(lockKey);
-        // 5.3 获取锁成功，开启独立线程，实现缓存重建
-        if (isLock) {
-            CACHE_REBUILD_EXECUTOR.submit(() -> {
-                try {
-                    this.saveShop2Redis(id, 20L);
-
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                } finally {
-                    // 释放锁
-                    unLock(lockKey);
-                }
-            });
-        }
+        CACHE_REBUILD_EXECUTOR.submit(() -> rebuildLogicalExpireCache(id));
         // 5.4 返回过期的商铺信息
         return shop;
 
@@ -152,11 +147,11 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         // 4. 实现缓存重建
 
         // 4.1 获取互斥锁
-        String lock = LOCK_SHOP_KEY + id;
+        SimpleRedisLock lock = new SimpleRedisLock(stringRedisTemplate, "shop:" + id);
         Shop shop = null;
         boolean isLock = false;
         try {
-             isLock = tryLock(lock);
+             isLock = lock.tryLock(LOCK_SHOP_TTL);
             // 4.2 判断锁是否获取成功锁
             if (!isLock) {
                 // 4.3 获取锁失败,别的线程已经获取到了休眠等待
@@ -185,13 +180,13 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
                 return null;
             }
             // 6. 存在，写入redis
-            stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(shop), CACHE_SHOP_TTL, TimeUnit.MINUTES);
+            cacheShopWithRandomTtl(key, shop);
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
         } finally {
             // 7. 释放锁
             if (isLock) {
-                unLock(lock);
+                lock.unLock();
             }
         }
         // 8. 返回
@@ -235,25 +230,31 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             return null;
         }
         // 5. 存在，写入redis
-        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(shop), CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        cacheShopWithRandomTtl(key, shop);
         // 6. 返回
         return shop;
     }
-    /*
-    * 获取锁
-    * */
-
-    private boolean tryLock(String key) {
-        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1");
-        return BooleanUtil.isTrue(flag);
+    private void cacheShopWithRandomTtl(String key, Shop shop) {
+        long ttl = CACHE_SHOP_TTL + ThreadLocalRandom.current().nextLong(1, CACHE_SHOP_TTL_RANDOM_MAX + 1);
+        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(shop), ttl, TimeUnit.MINUTES);
     }
 
-    /*
-    * 释放锁
-    * */
-
-    private void unLock(String key) {
-        stringRedisTemplate.delete(key);
+    private void rebuildLogicalExpireCache(Long id) {
+        SimpleRedisLock lock = new SimpleRedisLock(stringRedisTemplate, "shop:" + id);
+        boolean isLock = false;
+        try {
+            isLock = lock.tryLock(LOCK_SHOP_TTL);
+            if (!isLock) {
+                return;
+            }
+            saveShop2Redis(id, 20L);
+        } catch (Exception e) {
+            LOGGER.error("Failed to rebuild logical-expire shop cache, shopId={}", id, e);
+        } finally {
+            if (isLock) {
+                lock.unLock();
+            }
+        }
     }
 
     /*
@@ -268,11 +269,34 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             return Result.fail("店铺id不能为空");
         }
         // 1. 更新数据库
-        updateById(shop);
+        boolean updated = updateById(shop);
+        if (!updated) {
+            return Result.fail("店铺不存在或更新失败");
+        }
         shopBloomFilter.add(id.toString());
-        // 2. 删除redis中的缓存
-        stringRedisTemplate.delete(CACHE_SHOP_KEY + shop.getId());
+        // 2. Delete the cache only after the new database value is committed.
+        evictShopCacheAfterCommit(id);
+        publishKnowledgeChanged(shop.getId());
         return Result.ok();
+    }
+
+    private void evictShopCacheAfterCommit(Long shopId) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            stringRedisTemplate.delete(CACHE_SHOP_KEY + shopId);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronizationAdapter() {
+            @Override
+            public void afterCommit() {
+                stringRedisTemplate.delete(CACHE_SHOP_KEY + shopId);
+            }
+        });
+    }
+
+    private void publishKnowledgeChanged(Long shopId) {
+        if (shopId != null) {
+            applicationEventPublisher.publishEvent(new ShopKnowledgeChangedEvent(shopId));
+        }
     }
 
     @Override

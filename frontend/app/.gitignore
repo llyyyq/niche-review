@@ -1,0 +1,4 @@
+# Runtime blog uploads are stored by the local Nginx instance and are not
+# versioned. Keep the directory itself so a fresh clone has the expected path.
+imgs/blogs/*
+!imgs/blogs/.gitkeep

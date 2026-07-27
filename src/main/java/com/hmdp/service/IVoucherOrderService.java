@@ -2,6 +2,7 @@ package com.hmdp.service;
 
 import com.hmdp.dto.Result;
 import com.hmdp.entity.VoucherOrder;
+import com.hmdp.entity.VoucherOrderCreateResult;
 import com.baomidou.mybatisplus.extension.service.IService;
 
 /**
@@ -22,7 +23,13 @@ public interface IVoucherOrderService extends IService<VoucherOrder> {
     /**
      * 消费秒杀消息，将订单写入 MySQL
      */
-    void voucherOrder(VoucherOrder voucherId);
+    VoucherOrderCreateResult voucherOrder(VoucherOrder voucherOrder);
+
+    /**
+     * Roll back an order-level Redis reservation after its message can no
+     * longer create a database order. Repeated invocations are safe.
+     */
+    boolean compensateSeckillReservation(Long voucherId, Long userId, Long orderId);
 
     /**
      * 超时关单：检查订单状态，如果仍为"未支付"，则取消订单并回滚库存。
