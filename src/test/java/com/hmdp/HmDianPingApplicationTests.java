@@ -16,6 +16,13 @@ import org.springframework.data.redis.connection.RedisGeoCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 import javax.annotation.Resource;
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -30,6 +37,10 @@ import static com.hmdp.utils.RedisConstants.*;
 
 @SpringBootTest
 class HmDianPingApplicationTests {
+    private static final int JMETER_USER_COUNT = 10_000;
+    private static final String JMETER_PHONE_PREFIX = "139900";
+    private static final Path JMETER_TOKEN_FILE = Paths.get("tokens.csv");
+
     @Resource
     private ShopServiceImpl shopService;
     @Resource
@@ -108,30 +119,68 @@ class HmDianPingApplicationTests {
     }
 
     @Test
-    void prepareTokens() {
-        for (long i = 2000; i < 3000; i++) {
-            String token = UUID.randomUUID().toString(true);
+    void prepareJmeterTokens() throws IOException {
+        // Reuse this fixed number range on later runs instead of inserting another 10,000 users.
+        Map<String, User> usersByPhone = userService.query()
+                .likeRight("phone", JMETER_PHONE_PREFIX)
+                .list()
+                .stream()
+                .collect(Collectors.toMap(User::getPhone, user -> user, (first, ignored) -> first));
+
+        List<User> usersToCreate = new ArrayList<>();
+        for (int i = 0; i < JMETER_USER_COUNT; i++) {
+            String phone = String.format("%s%05d", JMETER_PHONE_PREFIX, i);
+            if (usersByPhone.containsKey(phone)) {
+                continue;
+            }
 
             User user = new User();
-            user.setId(i);
-            user.setPhone("13" + i);
-            user.setNickName("test_user_" + i);
+            user.setPhone(phone);
+            user.setNickName("jmeter_user_" + i);
             user.setIcon("");
-
-            userService.save(user);
-
-            UserDTO userDTO = BeanUtil.copyProperties(user, UserDTO.class);
-            Map<String, Object> userMap = BeanUtil.beanToMap(userDTO, new HashMap<>(),
-                    CopyOptions.create()
-                            .setIgnoreNullValue(true)
-                            .setFieldValueEditor((fieldName, fieldValue) -> fieldValue.toString()));
-
-            String tokenKey = LOGIN_USER_KEY + token;
-            stringRedisTemplate.opsForHash().putAll(tokenKey, userMap);
-            stringRedisTemplate.expire(tokenKey, LOGIN_USER_TTL, TimeUnit.MINUTES);
-
-            System.out.println(token);
+            usersToCreate.add(user);
+            usersByPhone.put(phone, user);
         }
+        if (!usersToCreate.isEmpty()) {
+            userService.saveBatch(usersToCreate, 500);
+        }
+
+        try (BufferedWriter writer = Files.newBufferedWriter(
+                JMETER_TOKEN_FILE,
+                StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE)) {
+            writer.write("token");
+            writer.newLine();
+
+            for (int i = 0; i < JMETER_USER_COUNT; i++) {
+                String phone = String.format("%s%05d", JMETER_PHONE_PREFIX, i);
+                User user = usersByPhone.get(phone);
+                if (user == null || user.getId() == null) {
+                    throw new IllegalStateException("JMeter test user was not created, phone=" + phone);
+                }
+                String token = UUID.randomUUID().toString(true);
+
+                UserDTO userDTO = BeanUtil.copyProperties(user, UserDTO.class);
+                Map<String, Object> userMap = BeanUtil.beanToMap(userDTO, new HashMap<>(),
+                        CopyOptions.create()
+                                .setIgnoreNullValue(true)
+                                .setFieldValueEditor((fieldName, fieldValue) -> fieldValue.toString()));
+
+                String tokenKey = LOGIN_USER_KEY + token;
+                stringRedisTemplate.opsForHash().putAll(tokenKey, userMap);
+                stringRedisTemplate.expire(tokenKey, LOGIN_USER_TTL, TimeUnit.MINUTES);
+
+                writer.write(token);
+                writer.newLine();
+            }
+        }
+
+        System.out.printf("Generated %d JMeter tokens at %s. Tokens expire after %d minutes.%n",
+                JMETER_USER_COUNT,
+                JMETER_TOKEN_FILE.toAbsolutePath(),
+                LOGIN_USER_TTL);
     }
 
 
