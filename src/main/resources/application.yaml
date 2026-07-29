@@ -41,6 +41,15 @@ ai:
   embedding:
     provider: disabled
     dimension: 1024
+  query-rewrite:
+    enabled: true
+    long-query-threshold-chars: 160
+    max-query-chars: 160
+    max-sub-queries: 3
+    context-message-limit: 4
+    max-context-chars: 2400
+    max-output-tokens: 256
+    read-timeout-ms: 8000
   knowledge:
     shop-collection: shop_knowledge
     retrieve-limit: 3
@@ -65,3 +74,9 @@ ai:
     max-recent-message-chars: 6000
     max-knowledge-chars: 6000
     max-tool-result-chars: 4000
+  evaluation:
+    enabled: false
+    mode: rag
+    rag-cases-path: docs/project-proof/rag-cases.csv
+    query-rewrite-cases-path: docs/project-proof/query-rewrite-cases.csv
+    query-rewrite-report-path: docs/project-proof/query-rewrite-evaluation.md

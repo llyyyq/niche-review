@@ -10,7 +10,7 @@ Niche Review 是一个面向本地生活场景的 Java 后端项目，提供店�
 | --- | --- |
 | [项目亮点](#highlights) | 缓存、秒杀、超时关单、RAG 与知识同步的核心设计 |
 | [核心架构](#architecture) | 五条关键业务链路及其边界 |
-| [测试与评测](#evaluation) | 自动化测试、压测对账与 RAG 固定评测 |
+| [测试与评测](#evaluation) | 自动化测试、压测对账、混合检索与查询重写评测 |
 | [故障恢复](#failure-recovery) | MQ、DLQ、超时任务和 Qdrant 故障处理 |
 | [运行链路](#trace) | AI 检索、工具调用、SSE、耗时与 Token 记录 |
 | [实现索引](#implementation-index) | 核心设计对应的代码与验证文档 |
@@ -23,7 +23,7 @@ Niche Review 是一个面向本地生活场景的 Java 后端项目，提供店�
 - **Redis 缓存治理**：结合 Redisson BloomFilter、空值缓存、随机 TTL 与带过期时间的 SETNX 互斥锁，处理缓存穿透、击穿和雪崩；通过唯一持有者标识与 Lua 安全释放锁，并在事务提交后删除缓存。
 - **可靠异步秒杀**：Lua 原子完成库存预扣和一人一单校验，RocketMQ 异步创建订单；通过消费幂等、失败重试、DLQ 与订单级预占标记完成最终失败补偿。
 - **可靠超时关单**：订单和超时任务在同一事务内落库，由定时投递器通过版本号 CAS 和指数退避发送延迟消息；订单级 Redisson 锁协调支付回调与超时关单。
-- **可评测的 RAG 检索**：聚合店铺、有效优惠券和公开探店笔记，融合向量召回、关键词 fallback 与类别、商圈、预算约束，并通过固定评测集比较纯向量与混合检索。
+- **可评测的 RAG 检索**：聚合店铺、有效优惠券和公开探店笔记；短问题直接检索，指代、长输入和多意图问题按需重写或拆分，再结合向量召回、关键词 fallback 与结构化约束。
 - **可恢复的知识同步**：业务变更后持久化同步任务，采用 CAS 抢占、指数退避和超时恢复更新 Qdrant，并记录 AI 检索、工具、耗时及 Token 数据。
 
 ## 业务能力
@@ -138,12 +138,18 @@ flowchart TD
 ```mermaid
 flowchart TD
     A["用户问题"] --> B["保存用户消息"]
-    B --> C["Embedding 向量化"]
+    B --> P{"查询预处理"}
+    P -- "短且明确" --> C["Embedding 向量化"]
+    P -- "指代 / 长输入 / 多意图" --> R["重写或拆分为最多 3 条检索查询"]
+    R -- "需要澄清" --> I["SSE 返回澄清问题"]
+    R -- "可检索查询" --> C
+    P -- "模型异常" --> CF["确定性压缩 fallback"]
+    CF --> C
     C --> D["Qdrant TopK 召回"]
     D --> E{"召回置信度是否足够"}
-    E -- "不足" --> F["关键词 fallback + 结构化约束"]
+    E -- "不足" --> KF["关键词 fallback + 结构化约束"]
     E -- "足够" --> G["候选合并与去重"]
-    F --> G
+    KF --> G
     G --> H{"是否存在可靠资料"}
     H -- "否" --> I["返回无证据提示"]
     H -- "是" --> J["快速工具路由或有限步规划"]
@@ -153,7 +159,7 @@ flowchart TD
     M --> N["保存助手消息、请求日志和工具日志"]
 ```
 
-RAG 文档聚合店铺画像、当前有效优惠券和公开探店笔记。对无可靠业务资料的问题直接拒答，避免把无关候选交给模型生成事实性回答。
+RAG 文档聚合店铺画像、当前有效优惠券和公开探店笔记。原始问题始终用于会话保存、工具规划和最终回答；重写结果只用于检索。对无可靠业务资料的问题直接拒答，避免把无关候选交给模型生成事实性回答。
 
 只读工具白名单包括店铺详情、附近店铺、优惠券和公开博客。明确意图使用快速工具路由，复杂选择最多执行一轮规划。
 
@@ -188,9 +194,10 @@ flowchart TD
 | --- | --- | --- |
 | Spring 集成测试 | 事务后删缓存、过期锁误删防护、重复订单消息 | `3/3` 通过，`Failures=0`，`Errors=0` |
 | 秒杀压测 | 10,000 个不同 Token、10,000 线程、Ramp-Up 30 秒、库存 100 | 平均吞吐 `333.2 req/s`；订单数和唯一用户数均为 `100`；MySQL/Redis 库存均为 `0` |
-| RAG 固定评测 | 43 条事实类问题、7 条无结果问题 | Hit@1：`88.37% -> 97.67%`；Hit@3：`93.02% -> 100%`；正确拒答 `7/7` |
+| RAG 混合检索基线 | 43 条事实类问题、7 条无结果问题 | 相较纯向量检索，Hit@1：`88.37% -> 97.67%`；Hit@3：`93.02% -> 100%`；正确拒答 `7/7` |
+| 查询重写 A/B 评测 | 40 条固定测试集，其中 35 条可检索、5 条歧义澄清 | 生产混合检索 Hit@1：`65.71% -> 85.71%`；Hit@3：`71.43% -> 91.43%`；歧义澄清 `5/5` |
 
-其中 RAG 指标比较的是同一批问题上的纯向量检索与混合检索，表示检索命中率，不等同于模型最终回答准确率。
+两组指标评测对象不同：前者验证关键词 fallback 与结构化约束对纯向量检索的补强，后者验证查询预处理相对原始问题直接 Embedding 的收益。两者均表示检索命中率，不等同于模型最终回答准确率。
 
 ### 验证材料
 
@@ -202,6 +209,8 @@ flowchart TD
 | [支付与关单竞争](docs/project-proof/payment-timeout-race.md) | 支付先到、关单先到及重复延迟消息 |
 | [RAG 评测报告](docs/project-proof/rag-evaluation.md) | 50 条固定案例的指标、口径与结论 |
 | [RAG 案例集](docs/project-proof/rag-cases.csv) | 每题预期事实、纯向量 Top3、混合检索 Top3 |
+| [查询重写评测报告](docs/project-proof/query-rewrite-evaluation.md) | 原始问题与查询预处理后的 A/B 检索、模式判断与 Bad Case |
+| [查询重写案例集](docs/project-proof/query-rewrite-cases.csv) | 50 条开发/测试案例、历史上下文、预期模式与实际结果 |
 | [知识库故障恢复](docs/project-proof/knowledge-sync-failure.md) | Qdrant 中断后任务重试并恢复为 SUCCEEDED |
 | [AI 调用 Trace](docs/project-proof/ai-agent-trace.md) | 两条真实请求的检索、工具、SSE、耗时与 Token |
 
@@ -242,7 +251,7 @@ AI 工具只开放店铺、附近店铺、优惠券和公开探店笔记等只�
 | 店铺缓存治理 | [`ShopServiceImpl`](src/main/java/com/hmdp/service/impl/ShopServiceImpl.java)、[`SimpleRedisLock`](src/main/java/com/hmdp/utils/SimpleRedisLock.java)、[`unlock.lua`](src/main/resources/unlock.lua) | [可靠性验证](docs/project-proof/reliability-verification.md) |
 | 秒杀下单与补偿 | [`VoucherOrderServiceImpl`](src/main/java/com/hmdp/service/impl/VoucherOrderServiceImpl.java)、[`VoucherOrderConsumer`](src/main/java/com/hmdp/mq/VoucherOrderConsumer.java)、[`VoucherOrderDeadLetterConsumer`](src/main/java/com/hmdp/mq/VoucherOrderDeadLetterConsumer.java)、[`seckill.lua`](src/main/resources/seckill.lua)、[`seckill_rollback.lua`](src/main/resources/seckill_rollback.lua) | [可靠性验证](docs/project-proof/reliability-verification.md)、[压测记录](docs/project-proof/seckill-pressure-test.md) |
 | 超时关单与支付竞争 | [`OrderTimeoutTaskServiceImpl`](src/main/java/com/hmdp/service/impl/OrderTimeoutTaskServiceImpl.java)、[`OrderTimeoutListener`](src/main/java/com/hmdp/mq/OrderTimeoutListener.java)、[`PaymentServiceImpl`](src/main/java/com/hmdp/service/impl/PaymentServiceImpl.java) | [竞争验证](docs/project-proof/payment-timeout-race.md) |
-| RAG 混合检索 | [`ShopKnowledgeServiceImpl`](src/main/java/com/hmdp/service/impl/ShopKnowledgeServiceImpl.java)、[`QdrantKnowledgeClient`](src/main/java/com/hmdp/ai/QdrantKnowledgeClient.java)、[`RagEvaluationRunner`](src/main/java/com/hmdp/evidence/RagEvaluationRunner.java) | [评测报告](docs/project-proof/rag-evaluation.md) |
+| RAG 混合检索与查询重写 | [`AiQueryPreprocessor`](src/main/java/com/hmdp/ai/AiQueryPreprocessor.java)、[`ShopKnowledgeServiceImpl`](src/main/java/com/hmdp/service/impl/ShopKnowledgeServiceImpl.java)、[`QdrantKnowledgeClient`](src/main/java/com/hmdp/ai/QdrantKnowledgeClient.java)、[`RagEvaluationRunner`](src/main/java/com/hmdp/evidence/RagEvaluationRunner.java)、[`QueryRewriteEvaluationRunner`](src/main/java/com/hmdp/evidence/QueryRewriteEvaluationRunner.java) | [混合检索评测](docs/project-proof/rag-evaluation.md)、[查询重写评测](docs/project-proof/query-rewrite-evaluation.md) |
 | 知识库增量同步 | [`ShopKnowledgeChangedListener`](src/main/java/com/hmdp/event/ShopKnowledgeChangedListener.java)、[`AiKnowledgeSyncTaskServiceImpl`](src/main/java/com/hmdp/service/impl/AiKnowledgeSyncTaskServiceImpl.java) | [故障恢复记录](docs/project-proof/knowledge-sync-failure.md) |
 | AI 会话、工具与 SSE | [`AiConversationServiceImpl`](src/main/java/com/hmdp/service/impl/AiConversationServiceImpl.java)、[`AiReadOnlyToolServiceImpl`](src/main/java/com/hmdp/service/impl/AiReadOnlyToolServiceImpl.java)、[`AiAgentRunner`](src/main/java/com/hmdp/ai/AiAgentRunner.java) | [AI Trace](docs/project-proof/ai-agent-trace.md)、[导出 SQL](docs/project-proof/ai-agent-trace-export.sql) |
 
@@ -348,7 +357,7 @@ mvn -q -Dtest=HmDianPingApplicationTests#prepareJmeterTokens test
 
 生成的 `tokens.csv` 包含登录 Token，已被 `.gitignore` 排除。JMeter 参数和对账步骤见[秒杀压测记录](docs/project-proof/seckill-pressure-test.md)。
 
-重新运行 RAG 评测时，设置 `AI_EVALUATION_ENABLED=true` 后启动应用；`RagEvaluationRunner` 会更新 [`rag-cases.csv`](docs/project-proof/rag-cases.csv)。完成后应关闭该变量。
+重新运行评测时，设置 `AI_EVALUATION_ENABLED=true` 并选择模式后启动应用：`AI_EVALUATION_MODE=rag` 运行混合检索基线评测，`AI_EVALUATION_MODE=query-rewrite` 运行查询重写评测，`all` 运行两者。对应运行器会更新案例 CSV 与报告；完成后应关闭该变量。
 
 AI 对话完成后，可以执行 [`ai-agent-trace-export.sql`](docs/project-proof/ai-agent-trace-export.sql) 导出消息、请求日志和工具日志。
 

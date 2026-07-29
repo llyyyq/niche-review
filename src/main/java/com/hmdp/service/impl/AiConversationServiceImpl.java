@@ -6,6 +6,8 @@ import com.hmdp.ai.AiChatModelClient;
 import com.hmdp.ai.AiAgentRunner;
 import com.hmdp.ai.AiPromptMessage;
 import com.hmdp.ai.AiPromptBuildResult;
+import com.hmdp.ai.AiQueryPreprocessor;
+import com.hmdp.ai.AiRetrievalQueryPlan;
 import com.hmdp.ai.AiTokenEstimator;
 import com.hmdp.ai.AiToolExecution;
 import com.hmdp.ai.ShopKnowledge;
@@ -76,6 +78,9 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
 
     @Resource
     private AiAgentRunner aiAgentRunner;
+
+    @Resource
+    private AiQueryPreprocessor aiQueryPreprocessor;
 
     @Resource
     private IAiConversationMemoryService aiConversationMemoryService;
@@ -309,7 +314,8 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
         AiPromptBuildResult promptBuildResult = null;
         try {
             emitter.send(SseEmitter.event().name("message_start").data(messageStartData(conversationId, assistantMessageId)));
-            promptBuildResult = buildPrompt(conversation, currentMessageId, currentQuestion, x, y);
+            promptBuildResult = buildPrompt(conversation, assistantMessageId,
+                    currentMessageId, currentQuestion, x, y);
             if (StrUtil.isNotBlank(promptBuildResult.getDirectResponse())) {
                 firstTokenMs.compareAndSet(-1L, System.currentTimeMillis() - modelStartedAt);
                 response.append(promptBuildResult.getDirectResponse());
@@ -363,8 +369,9 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
         return data;
     }
 
-    private AiPromptBuildResult buildPrompt(AiConversation conversation, Long currentMessageId, String currentQuestion,
-                                              Double x, Double y) {
+    private AiPromptBuildResult buildPrompt(AiConversation conversation, Long assistantMessageId,
+                                            Long currentMessageId, String currentQuestion,
+                                            Double x, Double y) {
         Long conversationId = conversation.getId();
         Long userId = conversation.getUserId();
         long pageSize = Math.max(1, aiChatProperties.getContextMessageLimit());
@@ -379,7 +386,25 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
         );
         List<AiPromptMessage> recentMessages = buildRecentMessageContext(page.getRecords(), currentMessageId);
         long retrievalStartedAt = System.currentTimeMillis();
-        List<ShopKnowledge> retrievedShops = shopKnowledgeService.searchRelevantShops(currentQuestion);
+        AiRetrievalQueryPlan queryPlan = aiQueryPreprocessor.preprocess(
+                conversationId,
+                userId,
+                assistantMessageId,
+                currentQuestion,
+                conversation.getSummary(),
+                recentMessages
+        );
+        if (queryPlan.requiresClarification()) {
+            return new AiPromptBuildResult(
+                    Collections.<AiPromptMessage>emptyList(),
+                    System.currentTimeMillis() - retrievalStartedAt,
+                    0L,
+                    0,
+                    queryPlan.getClarification()
+            );
+        }
+        List<ShopKnowledge> retrievedShops =
+                shopKnowledgeService.searchRelevantShops(queryPlan.getQueries());
         long retrievalMs = System.currentTimeMillis() - retrievalStartedAt;
         long toolStartedAt = System.currentTimeMillis();
         boolean businessEvidenceRequired = requiresBusinessEvidence(currentQuestion);

@@ -12,9 +12,13 @@ public interface IShopKnowledgeService {
 
     List<ShopKnowledge> searchRelevantShops(String question);
 
+    List<ShopKnowledge> searchRelevantShops(List<String> questions);
+
     /**
      * Used by the local evaluation runner to compare pure vector retrieval with
      * the production hybrid retrieval path without changing shared properties.
      */
     List<ShopKnowledge> searchRelevantShops(String question, boolean keywordFallbackEnabled);
+
+    List<ShopKnowledge> searchRelevantShops(List<String> questions, boolean keywordFallbackEnabled);
 }

@@ -21,13 +21,15 @@ import org.springframework.stereotype.Service;
 import javax.annotation.Resource;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.LinkedHashSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -118,54 +120,123 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
 
     @Override
     public List<ShopKnowledge> searchRelevantShops(String question) {
-        return searchRelevantShops(question, Boolean.TRUE.equals(knowledgeProperties.getKeywordFallbackEnabled()));
+        return searchRelevantShops(Collections.singletonList(question));
+    }
+
+    @Override
+    public List<ShopKnowledge> searchRelevantShops(List<String> questions) {
+        return searchRelevantShops(questions,
+                Boolean.TRUE.equals(knowledgeProperties.getKeywordFallbackEnabled()));
     }
 
     @Override
     public List<ShopKnowledge> searchRelevantShops(String question, boolean keywordFallbackEnabled) {
-        if (StrUtil.isBlank(question)) {
+        return searchRelevantShops(Collections.singletonList(question), keywordFallbackEnabled);
+    }
+
+    @Override
+    public List<ShopKnowledge> searchRelevantShops(List<String> questions, boolean keywordFallbackEnabled) {
+        List<String> validQuestions = validQuestions(questions);
+        if (validQuestions.isEmpty()) {
             return Collections.emptyList();
         }
         try {
-            List<List<Float>> vectors = embeddingModelClient.embed(Collections.singletonList(question));
-            List<QdrantKnowledgeClient.QdrantSearchResult> results = qdrantKnowledgeClient.search(
-                    knowledgeProperties.getShopCollection(), vectors.get(0), knowledgeProperties.getRetrieveLimit());
-            List<ShopKnowledge> vectorShops = new ArrayList<>(results.size());
-            for (QdrantKnowledgeClient.QdrantSearchResult result : results) {
-                Map<String, Object> payload = result.getPayload();
-                Object content = payload.get("content");
-                vectorShops.add(new ShopKnowledge(result.getId(), content == null ? "" : String.valueOf(content),
-                        result.getScore(), payload));
+            List<List<Float>> vectors = embeddingModelClient.embed(validQuestions);
+            if (vectors.size() != validQuestions.size()) {
+                throw new IllegalStateException("Embedding count does not match query count");
             }
-            if (!keywordFallbackEnabled) {
-                return vectorShops;
+            List<List<ShopKnowledge>> resultGroups = new ArrayList<>(validQuestions.size());
+            for (int index = 0; index < validQuestions.size(); index++) {
+                resultGroups.add(searchSingleQuery(
+                        validQuestions.get(index),
+                        vectors.get(index),
+                        keywordFallbackEnabled
+                ));
             }
-
-            RetrievalContext context = buildRetrievalContext(question);
-            if (context.explicitUnknownShop) {
-                log.info("RAG retrieval rejected an unknown explicit shop query, questionLength={}",
-                        question.length());
-                return Collections.emptyList();
-            }
-
-            List<ShopKnowledge> constrainedVectorShops = applyStructuredConstraints(vectorShops, context);
-            List<ShopKnowledge> keywordShops = keywordFallback(context);
-            if (!keywordShops.isEmpty()) {
-                List<ShopKnowledge> merged = mergeKnowledge(keywordShops, constrainedVectorShops);
-                log.info("Hybrid retrieval merged keyword and vector results, questionLength={}, "
-                                + "vectorResultCount={}, keywordResultCount={}, mergedResultCount={}",
-                        question.length(), constrainedVectorShops.size(), keywordShops.size(), merged.size());
-                return merged;
-            }
-
-            return isReliableVectorResult(constrainedVectorShops)
-                    ? constrainedVectorShops
-                    : Collections.emptyList();
+            return mergeRoundRobin(resultGroups);
         } catch (Exception e) {
             // Retrieval is an enhancement. A temporary vector/embedding failure must not stop the chat service.
             log.warn("Vector retrieval skipped, attempting keyword fallback: {}", e.getMessage());
-            return keywordFallback(question, keywordFallbackEnabled);
+            List<List<ShopKnowledge>> fallbackGroups = new ArrayList<>(validQuestions.size());
+            for (String question : validQuestions) {
+                fallbackGroups.add(keywordFallback(question, keywordFallbackEnabled));
+            }
+            return mergeRoundRobin(fallbackGroups);
         }
+    }
+
+    private List<ShopKnowledge> searchSingleQuery(String question, List<Float> vector,
+                                                   boolean keywordFallbackEnabled) throws Exception {
+        List<QdrantKnowledgeClient.QdrantSearchResult> results = qdrantKnowledgeClient.search(
+                knowledgeProperties.getShopCollection(), vector, knowledgeProperties.getRetrieveLimit());
+        List<ShopKnowledge> vectorShops = new ArrayList<>(results.size());
+        for (QdrantKnowledgeClient.QdrantSearchResult result : results) {
+            Map<String, Object> payload = result.getPayload();
+            Object content = payload.get("content");
+            vectorShops.add(new ShopKnowledge(result.getId(), content == null ? "" : String.valueOf(content),
+                    result.getScore(), payload));
+        }
+        if (!keywordFallbackEnabled) {
+            return vectorShops;
+        }
+
+        RetrievalContext context = buildRetrievalContext(question);
+        if (context.explicitUnknownShop) {
+            log.info("RAG retrieval rejected an unknown explicit shop query, questionLength={}",
+                    question.length());
+            return Collections.emptyList();
+        }
+
+        List<ShopKnowledge> constrainedVectorShops = applyStructuredConstraints(vectorShops, context);
+        List<ShopKnowledge> keywordShops = keywordFallback(context);
+        if (!keywordShops.isEmpty()) {
+            List<ShopKnowledge> merged = mergeKnowledge(keywordShops, constrainedVectorShops);
+            log.info("Hybrid retrieval merged keyword and vector results, questionLength={}, "
+                            + "vectorResultCount={}, keywordResultCount={}, mergedResultCount={}",
+                    question.length(), constrainedVectorShops.size(), keywordShops.size(), merged.size());
+            return merged;
+        }
+        return isReliableVectorResult(constrainedVectorShops)
+                ? constrainedVectorShops
+                : Collections.emptyList();
+    }
+
+    private List<String> validQuestions(List<String> questions) {
+        if (questions == null || questions.isEmpty()) {
+            return Collections.emptyList();
+        }
+        Set<String> unique = new LinkedHashSet<>();
+        for (String question : questions) {
+            if (StrUtil.isNotBlank(question)) {
+                unique.add(question.trim());
+            }
+        }
+        return new ArrayList<>(unique);
+    }
+
+    private List<ShopKnowledge> mergeRoundRobin(List<List<ShopKnowledge>> groups) {
+        if (groups == null || groups.isEmpty()) {
+            return Collections.emptyList();
+        }
+        Map<Long, ShopKnowledge> merged = new LinkedHashMap<>();
+        int limit = Math.max(1, knowledgeProperties.getRetrieveLimit());
+        int maxSize = 0;
+        for (List<ShopKnowledge> group : groups) {
+            maxSize = Math.max(maxSize, group == null ? 0 : group.size());
+        }
+        for (int rank = 0; rank < maxSize && merged.size() < limit; rank++) {
+            for (List<ShopKnowledge> group : groups) {
+                if (group == null || rank >= group.size()) {
+                    continue;
+                }
+                ShopKnowledge knowledge = group.get(rank);
+                merged.putIfAbsent(knowledge.getShopId(), knowledge);
+                if (merged.size() >= limit) {
+                    break;
+                }
+            }
+        }
+        return new ArrayList<>(merged.values());
     }
 
     private boolean isReliableVectorResult(List<ShopKnowledge> shops) {
@@ -221,6 +292,9 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
     }
 
     private int keywordScore(Shop shop, String typeName, RetrievalContext context) {
+        if (context.excludedShopIds.contains(shop.getId())) {
+            return 0;
+        }
         if (!context.matchedShopIds.isEmpty() && !context.matchedShopIds.contains(shop.getId())) {
             return 0;
         }
@@ -328,9 +402,14 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
         List<Shop> shops = shopService.list();
         String normalizedQuestion = normalize(question);
         Set<Long> matchedShopIds = new LinkedHashSet<>();
+        Set<Long> excludedShopIds = new LinkedHashSet<>();
         for (Shop shop : shops) {
             if (explicitShopNameMatchScore(normalizedQuestion, shop.getName()) > 0) {
-                matchedShopIds.add(shop.getId());
+                if (isExcludedShop(normalizedQuestion, shop.getName())) {
+                    excludedShopIds.add(shop.getId());
+                } else {
+                    matchedShopIds.add(shop.getId());
+                }
             }
         }
         Long maxAveragePrice = parseMaxAveragePrice(question);
@@ -342,8 +421,23 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
                 "ktv", "\u5531\u6b4c", "\u5531k", "\u6b4c\u5385");
         boolean explicitUnknownShop = matchedShopIds.isEmpty()
                 && looksLikeExplicitUnknownShop(normalizedQuestion);
-        return new RetrievalContext(shops, normalizedQuestion, matchedShopIds,
+        return new RetrievalContext(shops, normalizedQuestion, matchedShopIds, excludedShopIds,
                 maxAveragePrice, foodIntent, ktvIntent, explicitUnknownShop);
+    }
+
+    private boolean isExcludedShop(String normalizedQuestion, String shopName) {
+        String normalizedName = normalize(shopName);
+        String coreName = normalize(stripShopBranch(shopName));
+        for (String marker : Arrays.asList(
+                "\u6392\u9664", "\u4e0d\u8981", "\u4e0d\u8003\u8651",
+                "\u9664\u4e86", "\u6362\u6389", "\u907f\u5f00"
+        )) {
+            if (normalizedQuestion.contains(marker + normalizedName)
+                    || (coreName.length() >= 3 && normalizedQuestion.contains(marker + coreName))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private List<ShopKnowledge> applyStructuredConstraints(List<ShopKnowledge> vectorShops,
@@ -353,6 +447,9 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
         }
         List<ShopKnowledge> filtered = new ArrayList<>();
         for (ShopKnowledge knowledge : vectorShops) {
+            if (context.excludedShopIds.contains(knowledge.getShopId())) {
+                continue;
+            }
             if (!context.matchedShopIds.isEmpty()
                     && !context.matchedShopIds.contains(knowledge.getShopId())) {
                 continue;
@@ -596,17 +693,20 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
         private final List<Shop> shops;
         private final String normalizedQuestion;
         private final Set<Long> matchedShopIds;
+        private final Set<Long> excludedShopIds;
         private final Long maxAveragePrice;
         private final boolean foodIntent;
         private final boolean ktvIntent;
         private final boolean explicitUnknownShop;
 
         private RetrievalContext(List<Shop> shops, String normalizedQuestion, Set<Long> matchedShopIds,
-                                 Long maxAveragePrice, boolean foodIntent, boolean ktvIntent,
+                                 Set<Long> excludedShopIds, Long maxAveragePrice,
+                                 boolean foodIntent, boolean ktvIntent,
                                  boolean explicitUnknownShop) {
             this.shops = shops;
             this.normalizedQuestion = normalizedQuestion;
             this.matchedShopIds = matchedShopIds;
+            this.excludedShopIds = excludedShopIds;
             this.maxAveragePrice = maxAveragePrice;
             this.foodIntent = foodIntent;
             this.ktvIntent = ktvIntent;

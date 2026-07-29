@@ -35,6 +35,8 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -124,6 +126,24 @@ class ShopKnowledgeServiceImplTest {
     }
 
     @Test
+    void hybridRetrievalShouldApplyExplicitExclusionConstraint() throws Exception {
+        List<Shop> shops = Arrays.asList(
+                shop(1L, "103\u8336\u9910\u5385", "\u8fd0\u6cb3\u4e0a\u8857", 80L),
+                shop(3L, "\u65b0\u767d\u9e7f\u9910\u5385", "\u8fd0\u6cb3\u4e0a\u8857", 61L),
+                shop(7L, "\u7089\u9c7c", "\u5317\u90e8\u65b0\u57ce", 90L)
+        );
+        arrangeVectorResults(shops, 1L, 3L, 7L);
+
+        List<ShopKnowledge> result = service.searchRelevantShops(
+                "\u63a8\u8350\u8fd0\u6cb3\u4e0a\u8857\u7684\u9910\u5385\uff0c"
+                        + "\u6392\u9664103\u8336\u9910\u5385\u3002", true
+        );
+
+        assertFalse(result.isEmpty());
+        assertTrue(result.stream().noneMatch(item -> item.getShopId().equals(1L)));
+    }
+
+    @Test
     void hybridRetrievalShouldBoostAnySharedBusinessPhraseWithoutTreatingItAsAnExactShopName() throws Exception {
         List<Shop> shops = Arrays.asList(
                 shop(1L, "103\u8336\u9910\u5385", "\u5927\u5173", 80L),
@@ -173,6 +193,34 @@ class ShopKnowledgeServiceImplTest {
         assertEquals(Arrays.asList(4L, 1L, 3L), shopIds(result));
     }
 
+    @Test
+    void multipleQueriesShouldUseOneEmbeddingBatchAndRoundRobinDeduplicate() throws Exception {
+        List<Shop> shops = Arrays.asList(
+                shop(1L, "103\u8336\u9910\u5385", "\u8fd0\u6cb3\u4e0a\u8857", 80L),
+                shop(2L, "\u8001\u5317\u4eac\u70e4\u8089", "\u62f1\u5bb8\u6865", 85L),
+                shop(3L, "\u65b0\u767d\u9e7f\u9910\u5385", "\u8fd0\u6cb3\u4e0a\u8857", 61L),
+                shop(4L, "Mamala", "\u8fdc\u6d0b\u4e50\u5824\u6e2f", 290L)
+        );
+        when(shopService.list()).thenReturn(shops);
+        List<String> questions = Arrays.asList(
+                "\u8fd0\u6cb3\u4e0a\u8857\u9910\u5385",
+                "\u6709\u4f18\u60e0\u5238\u7684\u9910\u5385"
+        );
+        when(embeddingModelClient.embed(questions)).thenReturn(Arrays.asList(
+                Collections.singletonList(0.1F),
+                Collections.singletonList(0.2F)
+        ));
+        when(qdrantKnowledgeClient.search(anyString(), any(List.class), anyInt()))
+                .thenReturn(qdrantResults(shops, 1L, 2L, 3L))
+                .thenReturn(qdrantResults(shops, 1L, 4L, 2L));
+
+        List<ShopKnowledge> result = service.searchRelevantShops(questions, false);
+
+        assertEquals(Arrays.asList(1L, 2L, 4L), shopIds(result));
+        verify(embeddingModelClient, times(1)).embed(questions);
+        verify(qdrantKnowledgeClient, times(2)).search(anyString(), any(List.class), anyInt());
+    }
+
     private void arrangeVectorResults(List<Shop> shops, Long... resultIds) throws Exception {
         when(shopService.list()).thenReturn(shops);
         Map<Long, Shop> shopsById = new HashMap<>();
@@ -190,6 +238,25 @@ class ShopKnowledgeServiceImplTest {
             ));
         }
         when(qdrantKnowledgeClient.search(anyString(), any(List.class), anyInt())).thenReturn(results);
+    }
+
+    private List<QdrantKnowledgeClient.QdrantSearchResult> qdrantResults(
+            List<Shop> shops, Long... resultIds) {
+        Map<Long, Shop> shopsById = new HashMap<>();
+        for (Shop shop : shops) {
+            shopsById.put(shop.getId(), shop);
+        }
+        List<QdrantKnowledgeClient.QdrantSearchResult> results = new ArrayList<>();
+        for (Long resultId : resultIds) {
+            Shop shop = shopsById.get(resultId);
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("content", shop.getName());
+            payload.put("avgPrice", shop.getAvgPrice());
+            results.add(new QdrantKnowledgeClient.QdrantSearchResult(
+                    resultId, 0.80D, payload
+            ));
+        }
+        return results;
     }
 
     private Shop shop(Long id, String name, String area, Long avgPrice) {

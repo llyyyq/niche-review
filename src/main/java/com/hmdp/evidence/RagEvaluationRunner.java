@@ -49,6 +49,10 @@ public class RagEvaluationRunner implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) {
+        String mode = evaluationProperties.getMode();
+        if (!"rag".equalsIgnoreCase(mode) && !"all".equalsIgnoreCase(mode)) {
+            return;
+        }
         Path path = Paths.get(evaluationProperties.getRagCasesPath());
         if (!Files.exists(path)) {
             log.warn("RAG evaluation skipped because the case file does not exist: {}", path.toAbsolutePath());

@@ -25,4 +25,9 @@ public class MockAiChatModelClient implements AiChatModelClient {
             Thread.sleep(40L);
         }
     }
+
+    @Override
+    public String complete(List<AiPromptMessage> messages, AiCompletionOptions options) {
+        return "{}";
+    }
 }

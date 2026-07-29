@@ -1,6 +1,7 @@
 package com.hmdp.ai;
 
 import cn.hutool.core.util.StrUtil;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hmdp.config.AiChatProperties;
@@ -40,7 +41,7 @@ public class OpenAiCompatibleChatModelClient implements AiChatModelClient {
         connection.setRequestProperty("Authorization", "Bearer " + aiChatProperties.getApiKey());
 
         try {
-            writeRequest(connection, messages);
+            writeRequest(connection, messages, true, null);
             int status = connection.getResponseCode();
             if (status < HttpURLConnection.HTTP_OK || status >= HttpURLConnection.HTTP_MULT_CHOICE) {
                 throw new IllegalStateException("AI provider returned HTTP " + status + ": "
@@ -52,8 +53,47 @@ public class OpenAiCompatibleChatModelClient implements AiChatModelClient {
         }
     }
 
-    private void writeRequest(HttpURLConnection connection, List<AiPromptMessage> messages) throws Exception {
-        JsonNode payload = objectMapper.valueToTree(new OpenAiRequest(aiChatProperties.getModel(), messages));
+    @Override
+    public String complete(List<AiPromptMessage> messages, AiCompletionOptions options) throws Exception {
+        validateConfiguration();
+        HttpURLConnection connection = (HttpURLConnection) new URL(aiChatProperties.getBaseUrl()).openConnection();
+        connection.setRequestMethod("POST");
+        connection.setConnectTimeout(aiChatProperties.getConnectTimeoutMs());
+        connection.setReadTimeout(options == null || options.getReadTimeoutMs() == null
+                ? aiChatProperties.getReadTimeoutMs()
+                : options.getReadTimeoutMs());
+        connection.setDoOutput(true);
+        connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+        connection.setRequestProperty("Accept", "application/json");
+        connection.setRequestProperty("Authorization", "Bearer " + aiChatProperties.getApiKey());
+
+        try {
+            writeRequest(connection, messages, false, options);
+            int status = connection.getResponseCode();
+            if (status < HttpURLConnection.HTTP_OK || status >= HttpURLConnection.HTTP_MULT_CHOICE) {
+                throw new IllegalStateException("AI provider returned HTTP " + status + ": "
+                        + readBody(connection.getErrorStream()));
+            }
+            JsonNode root = objectMapper.readTree(connection.getInputStream());
+            JsonNode content = root.path("choices").path(0).path("message").path("content");
+            if (content.isMissingNode() || content.isNull()) {
+                throw new IllegalStateException("AI provider returned an empty completion");
+            }
+            return content.asText();
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private void writeRequest(HttpURLConnection connection, List<AiPromptMessage> messages,
+                              boolean stream, AiCompletionOptions options) throws Exception {
+        JsonNode payload = objectMapper.valueToTree(new OpenAiRequest(
+                aiChatProperties.getModel(),
+                messages,
+                stream,
+                options == null ? null : options.getTemperature(),
+                options == null ? null : options.getMaxTokens()
+        ));
         try (OutputStream outputStream = connection.getOutputStream()) {
             outputStream.write(objectMapper.writeValueAsBytes(payload));
         }
@@ -102,11 +142,17 @@ public class OpenAiCompatibleChatModelClient implements AiChatModelClient {
     private static class OpenAiRequest {
         private final String model;
         private final List<AiPromptMessage> messages;
-        private final boolean stream = true;
+        private final boolean stream;
+        private final Double temperature;
+        private final Integer maxTokens;
 
-        private OpenAiRequest(String model, List<AiPromptMessage> messages) {
+        private OpenAiRequest(String model, List<AiPromptMessage> messages, boolean stream,
+                              Double temperature, Integer maxTokens) {
             this.model = model;
             this.messages = messages;
+            this.stream = stream;
+            this.temperature = temperature;
+            this.maxTokens = maxTokens;
         }
 
         public String getModel() {
@@ -119,6 +165,15 @@ public class OpenAiCompatibleChatModelClient implements AiChatModelClient {
 
         public boolean isStream() {
             return stream;
+        }
+
+        public Double getTemperature() {
+            return temperature;
+        }
+
+        @JsonProperty("max_tokens")
+        public Integer getMaxTokens() {
+            return maxTokens;
         }
     }
 }
