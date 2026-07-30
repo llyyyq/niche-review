@@ -305,27 +305,81 @@ public class QueryRewriteEvaluationRunner implements ApplicationRunner {
 
         StringBuilder report = new StringBuilder();
         report.append("# 查询重写与检索输入评测\n\n");
-        report.append("> 生成时间：").append(LocalDateTime.now()).append("  \n");
-        report.append("> 数据快照：MySQL 店铺数 ").append(shopNamesById.size()).append("  \n");
+        report.append("> 生成时间：").append(LocalDateTime.now()).append('\n');
+        report.append("> 数据快照：MySQL 店铺数 ").append(shopNamesById.size()).append('\n');
         report.append("> 口径：10 条开发集不计入最终指标，以下结果仅统计 40 条固定测试集。\n\n");
         report.append("## 评测目标\n\n");
         report.append("对比同一知识库下的“原始问题直接检索”和“查询预处理后检索”。")
                 .append("Hit@K 只衡量检索是否命中预期店铺，不代表最终回答准确率。\n\n");
-        report.append("## 汇总结果\n\n");
-        report.append("| 指标 | 原始输入 | 查询预处理后 |\n");
-        report.append("|---|---:|---:|\n");
-        appendHitRow(report, "纯向量 Hit@1", retrievalRecords,
+        report.append("## 四组检索对照\n\n");
+        report.append("A 为原始问题直接向量检索，B 为原始问题加关键词混合检索，")
+                .append("C 为查询预处理后纯向量检索，D 为查询预处理后生产混合检索。")
+                .append("澄清类问题不计入 Hit@K 分母。\n\n");
+        report.append("| 指标 | A 原始+向量 | B 原始+混合 | C 预处理+向量 | D 预处理+混合 |\n");
+        report.append("|---|---:|---:|---:|---:|\n");
+        appendFourWayHitRow(report, "Hit@1", retrievalRecords,
                 record -> hitAt1(record.baselineVector, record.expectedShopIds),
-                record -> hitAt1(record.rewrittenVector, record.expectedShopIds));
-        appendHitRow(report, "纯向量 Hit@3", retrievalRecords,
-                record -> hitAt3(record.baselineVector, record.expectedShopIds),
-                record -> hitAt3(record.rewrittenVector, record.expectedShopIds));
-        appendHitRow(report, "生产混合检索 Hit@1", retrievalRecords,
                 record -> hitAt1(record.baselineHybrid, record.expectedShopIds),
+                record -> hitAt1(record.rewrittenVector, record.expectedShopIds),
                 record -> hitAt1(record.rewrittenHybrid, record.expectedShopIds));
-        appendHitRow(report, "生产混合检索 Hit@3", retrievalRecords,
+        appendFourWayHitRow(report, "Hit@3", retrievalRecords,
+                record -> hitAt3(record.baselineVector, record.expectedShopIds),
                 record -> hitAt3(record.baselineHybrid, record.expectedShopIds),
+                record -> hitAt3(record.rewrittenVector, record.expectedShopIds),
                 record -> hitAt3(record.rewrittenHybrid, record.expectedShopIds));
+
+        report.append("\n## 组件收益拆分\n\n");
+        report.append("以下为绝对百分点变化，用于区分查询重写和关键词混合检索各自带来的影响。\n\n");
+        report.append("| 对比 | Hit@1 | Hit@3 | 含义 |\n");
+        report.append("|---|---:|---:|---|\n");
+        appendContributionRow(report, "B - A", retrievalRecords,
+                record -> hitAt1(record.baselineHybrid, record.expectedShopIds),
+                record -> hitAt1(record.baselineVector, record.expectedShopIds),
+                record -> hitAt3(record.baselineHybrid, record.expectedShopIds),
+                record -> hitAt3(record.baselineVector, record.expectedShopIds),
+                "原始输入下关键词混合检索的独立收益");
+        appendContributionRow(report, "C - A", retrievalRecords,
+                record -> hitAt1(record.rewrittenVector, record.expectedShopIds),
+                record -> hitAt1(record.baselineVector, record.expectedShopIds),
+                record -> hitAt3(record.rewrittenVector, record.expectedShopIds),
+                record -> hitAt3(record.baselineVector, record.expectedShopIds),
+                "查询预处理在纯向量检索下的独立收益");
+        appendContributionRow(report, "D - C", retrievalRecords,
+                record -> hitAt1(record.rewrittenHybrid, record.expectedShopIds),
+                record -> hitAt1(record.rewrittenVector, record.expectedShopIds),
+                record -> hitAt3(record.rewrittenHybrid, record.expectedShopIds),
+                record -> hitAt3(record.rewrittenVector, record.expectedShopIds),
+                "查询预处理后关键词混合检索的增量收益");
+        appendContributionRow(report, "D - A", retrievalRecords,
+                record -> hitAt1(record.rewrittenHybrid, record.expectedShopIds),
+                record -> hitAt1(record.baselineVector, record.expectedShopIds),
+                record -> hitAt3(record.rewrittenHybrid, record.expectedShopIds),
+                record -> hitAt3(record.baselineVector, record.expectedShopIds),
+                "完整生产链路相对原始纯向量基线的总收益");
+        report.append("- 原始输入下关键词参与后 Top3 发生变化的比例：")
+                .append(rate(retrievalRecords,
+                        record -> !record.baselineVector.equals(record.baselineHybrid)))
+                .append('\n');
+        report.append("- 查询预处理后关键词参与后 Top3 发生变化的比例：")
+                .append(rate(retrievalRecords,
+                        record -> !record.rewrittenVector.equals(record.rewrittenHybrid)))
+                .append('\n');
+
+        report.append("\n## 按场景查看生产链路\n\n");
+        report.append("| 场景 | 样本数 | D: Hit@1 | D: Hit@3 |\n");
+        report.append("|---|---:|---:|---:|\n");
+        for (String scenario : Arrays.asList("pass-through", "context-reference", "long-noisy",
+                "multi-intent", "inherited-constraint")) {
+            List<EvaluationRecord> scenarioRecords = retrievalRecords.stream()
+                    .filter(record -> scenario.equalsIgnoreCase(record.scenario))
+                    .collect(Collectors.toList());
+            report.append('|').append(scenario).append('|').append(scenarioRecords.size()).append('|')
+                    .append(rate(scenarioRecords,
+                            record -> hitAt1(record.rewrittenHybrid, record.expectedShopIds)))
+                    .append('|').append(rate(scenarioRecords,
+                            record -> hitAt3(record.rewrittenHybrid, record.expectedShopIds)))
+                    .append("|\n");
+        }
 
         report.append("\n## 查询预处理行为\n\n");
         report.append("- 模式判断准确率：").append(rate(records, record -> record.modeMatch)).append('\n');
@@ -404,11 +458,25 @@ public class QueryRewriteEvaluationRunner implements ApplicationRunner {
         return report.toString();
     }
 
-    private void appendHitRow(StringBuilder report, String name, List<EvaluationRecord> records,
-                              RecordPredicate baseline, RecordPredicate rewritten) {
+    private void appendFourWayHitRow(StringBuilder report, String name, List<EvaluationRecord> records,
+                                      RecordPredicate baselineVector, RecordPredicate baselineHybrid,
+                                      RecordPredicate rewrittenVector, RecordPredicate rewrittenHybrid) {
         report.append('|').append(name).append('|')
-                .append(rate(records, baseline)).append('|')
-                .append(rate(records, rewritten)).append("|\n");
+                .append(rate(records, baselineVector)).append('|')
+                .append(rate(records, baselineHybrid)).append('|')
+                .append(rate(records, rewrittenVector)).append('|')
+                .append(rate(records, rewrittenHybrid)).append("|\n");
+    }
+
+    private void appendContributionRow(StringBuilder report, String comparison,
+                                       List<EvaluationRecord> records,
+                                       RecordPredicate currentHitAt1, RecordPredicate baselineHitAt1,
+                                       RecordPredicate currentHitAt3, RecordPredicate baselineHitAt3,
+                                       String meaning) {
+        report.append('|').append(comparison).append('|')
+                .append(percentagePointDelta(records, currentHitAt1, baselineHitAt1)).append('|')
+                .append(percentagePointDelta(records, currentHitAt3, baselineHitAt3)).append('|')
+                .append(meaning).append("|\n");
     }
 
     private boolean hitAt1(List<Long> actual, Set<Long> expected) {
@@ -423,13 +491,28 @@ public class QueryRewriteEvaluationRunner implements ApplicationRunner {
         if (records.isEmpty()) {
             return "N/A";
         }
+        int hits = countHits(records, predicate);
+        return percent(hits, records.size()) + " (" + hits + "/" + records.size() + ")";
+    }
+
+    private String percentagePointDelta(List<EvaluationRecord> records,
+                                        RecordPredicate current, RecordPredicate baseline) {
+        if (records.isEmpty()) {
+            return "N/A";
+        }
+        double currentRate = countHits(records, current) * 100D / records.size();
+        double baselineRate = countHits(records, baseline) * 100D / records.size();
+        return String.format("%+.2f 个百分点", currentRate - baselineRate);
+    }
+
+    private int countHits(List<EvaluationRecord> records, RecordPredicate predicate) {
         int hits = 0;
         for (EvaluationRecord record : records) {
             if (predicate.test(record)) {
                 hits++;
             }
         }
-        return percent(hits, records.size()) + " (" + hits + "/" + records.size() + ")";
+        return hits;
     }
 
     private String percent(int numerator, int denominator) {

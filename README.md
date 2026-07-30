@@ -195,7 +195,7 @@ flowchart TD
 | Spring 集成测试 | 事务后删缓存、过期锁误删防护、重复订单消息 | `3/3` 通过，`Failures=0`，`Errors=0` |
 | 秒杀压测 | 10,000 个不同 Token、10,000 线程、Ramp-Up 30 秒、库存 100 | 平均吞吐 `333.2 req/s`；订单数和唯一用户数均为 `100`；MySQL/Redis 库存均为 `0` |
 | RAG 混合检索基线 | 43 条事实类问题、7 条无结果问题 | 相较纯向量检索，Hit@1：`88.37% -> 97.67%`；Hit@3：`93.02% -> 100%`；正确拒答 `7/7` |
-| 查询重写 A/B 评测 | 40 条固定测试集，其中 35 条可检索、5 条歧义澄清 | 生产混合检索 Hit@1：`65.71% -> 85.71%`；Hit@3：`71.43% -> 91.43%`；歧义澄清 `5/5` |
+| 查询重写四路对照评测 | 40 条固定测试集，其中 35 条可检索、5 条歧义澄清 | 原始混合检索到预处理后混合检索：Hit@1 `65.71% -> 88.57%`，Hit@3 `71.43% -> 94.29%`；歧义澄清 `5/5` |
 
 两组指标评测对象不同：前者验证关键词 fallback 与结构化约束对纯向量检索的补强，后者验证查询预处理相对原始问题直接 Embedding 的收益。两者均表示检索命中率，不等同于模型最终回答准确率。
 
@@ -209,10 +209,11 @@ flowchart TD
 | [支付与关单竞争](docs/project-proof/payment-timeout-race.md) | 支付先到、关单先到及重复延迟消息 |
 | [RAG 评测报告](docs/project-proof/rag-evaluation.md) | 50 条固定案例的指标、口径与结论 |
 | [RAG 案例集](docs/project-proof/rag-cases.csv) | 每题预期事实、纯向量 Top3、混合检索 Top3 |
-| [查询重写评测报告](docs/project-proof/query-rewrite-evaluation.md) | 原始问题与查询预处理后的 A/B 检索、模式判断与 Bad Case |
+| [查询重写评测报告](docs/project-proof/query-rewrite-evaluation.md) | A/B/C/D 四路检索对照、组件收益、模式判断与 Bad Case |
 | [查询重写案例集](docs/project-proof/query-rewrite-cases.csv) | 50 条开发/测试案例、历史上下文、预期模式与实际结果 |
 | [知识库故障恢复](docs/project-proof/knowledge-sync-failure.md) | Qdrant 中断后任务重试并恢复为 SUCCEEDED |
 | [AI 调用 Trace](docs/project-proof/ai-agent-trace.md) | 两条真实请求的检索、工具、SSE、耗时与 Token |
+| [Agent 面试演练](docs/project-proof/agent-interview-drill.md) | 围绕 Agent、RAG、交易一致性与评测口径的高压追问及回答 |
 
 <a id="failure-recovery"></a>
 
