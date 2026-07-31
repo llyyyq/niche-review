@@ -5,7 +5,9 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.slf4j.MDC;
 
+import java.util.Map;
 import java.util.concurrent.Executor;
 
 @Configuration
@@ -18,7 +20,8 @@ import java.util.concurrent.Executor;
         AiEvaluationProperties.class,
         AiMemoryProperties.class,
         AiAgentProperties.class,
-        AiQueryRewriteProperties.class
+        AiQueryRewriteProperties.class,
+        AiTraceProperties.class
 })
 public class AiChatConfig {
 
@@ -29,6 +32,7 @@ public class AiChatConfig {
         executor.setMaxPoolSize(8);
         executor.setQueueCapacity(100);
         executor.setThreadNamePrefix("ai-chat-");
+        executor.setTaskDecorator(this::decorateWithMdc);
         executor.initialize();
         return executor;
     }
@@ -40,7 +44,28 @@ public class AiChatConfig {
         executor.setMaxPoolSize(2);
         executor.setQueueCapacity(100);
         executor.setThreadNamePrefix("ai-knowledge-");
+        executor.setTaskDecorator(this::decorateWithMdc);
         executor.initialize();
         return executor;
+    }
+
+    private Runnable decorateWithMdc(Runnable task) {
+        Map<String, String> callerContext = MDC.getCopyOfContextMap();
+        return () -> {
+            Map<String, String> previous = MDC.getCopyOfContextMap();
+            try {
+                if (callerContext == null) {
+                    MDC.clear();
+                } else {
+                    MDC.setContextMap(callerContext);
+                }
+                task.run();
+            } finally {
+                MDC.clear();
+                if (previous != null) {
+                    MDC.setContextMap(previous);
+                }
+            }
+        };
     }
 }

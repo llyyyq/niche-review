@@ -21,6 +21,18 @@ public class AiToolLog implements Serializable {
 
     private Long userId;
 
+    private Long assistantMessageId;
+
+    private String requestId;
+
+    private String traceId;
+
+    private String spanId;
+
+    private String parentSpanId;
+
+    private String toolCallId;
+
     private String toolName;
 
     private String requestContent;

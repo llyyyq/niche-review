@@ -7,6 +7,7 @@ import com.hmdp.config.AiChatProperties;
 import com.hmdp.config.AiQueryRewriteProperties;
 import com.hmdp.entity.AiRequestLog;
 import com.hmdp.service.IAiRequestLogService;
+import com.hmdp.service.IAiTraceService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -16,7 +17,9 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 @Slf4j
@@ -75,9 +78,50 @@ public class AiQueryPreprocessor {
     @Resource
     private IAiRequestLogService aiRequestLogService;
 
+    @Resource
+    private IAiTraceService aiTraceService;
+
     public AiRetrievalQueryPlan preprocess(Long conversationId, Long userId, Long assistantMessageId,
                                            String question, String summary,
                                            List<AiPromptMessage> recentMessages) {
+        return preprocess(null, conversationId, userId, assistantMessageId,
+                question, summary, recentMessages);
+    }
+
+    public AiRetrievalQueryPlan preprocess(AiTraceContext traceContext,
+                                           Long conversationId, Long userId, Long assistantMessageId,
+                                           String question, String summary,
+                                           List<AiPromptMessage> recentMessages) {
+        Map<String, Object> startAttributes = new LinkedHashMap<>();
+        startAttributes.put("originalChars", question == null ? 0 : question.length());
+        AiTraceSpanScope preprocessSpan = startTraceSpan(
+                traceContext, "QUERY_PREPROCESS", startAttributes);
+        try {
+            AiRetrievalQueryPlan result = doPreprocess(spanContext(preprocessSpan, traceContext), conversationId, userId,
+                    assistantMessageId, question, summary, recentMessages);
+            Map<String, Object> resultAttributes = new LinkedHashMap<>();
+            resultAttributes.put("mode", result.getMode());
+            resultAttributes.put("queryCount", result.getQueries().size());
+            resultAttributes.put("modelCalled", result.isModelCalled());
+            resultAttributes.put("validModelOutput", result.isValidModelOutput());
+            resultAttributes.put("originalChars", result.getOriginalChars());
+            resultAttributes.put("rewrittenChars", result.getRewrittenChars());
+            if (preprocessSpan != null) {
+                preprocessSpan.success(resultAttributes);
+            }
+            return result;
+        } catch (RuntimeException e) {
+            if (preprocessSpan != null) {
+                preprocessSpan.failure(e);
+            }
+            throw e;
+        }
+    }
+
+    private AiRetrievalQueryPlan doPreprocess(AiTraceContext traceContext,
+                                              Long conversationId, Long userId, Long assistantMessageId,
+                                              String question, String summary,
+                                              List<AiPromptMessage> recentMessages) {
         String original = normalizeWhitespace(question);
         if (StrUtil.isBlank(original)) {
             return plan(AiQueryRewriteMode.PASS_THROUGH, Collections.<String>emptyList(),
@@ -100,6 +144,8 @@ public class AiQueryPreprocessor {
         List<AiPromptMessage> modelMessages = buildRewritePrompt(original, summary, recentMessages);
         long startedAt = System.currentTimeMillis();
         String rawOutput = "";
+        AiTraceSpanScope rewriteSpan = startTraceSpan(
+                traceContext, "QUERY_REWRITE_MODEL", Collections.<String, Object>emptyMap());
         try {
             rawOutput = aiChatModelClient.complete(modelMessages, new AiCompletionOptions(
                     0D,
@@ -109,11 +155,25 @@ public class AiQueryPreprocessor {
             long duration = System.currentTimeMillis() - startedAt;
             AiRetrievalQueryPlan parsed = parseModelOutput(rawOutput, original, duration);
             if (parsed == null) {
-                saveRewriteLog(conversationId, userId, assistantMessageId, modelMessages,
+                IllegalStateException invalidOutput = new IllegalStateException("Query rewriter returned invalid JSON");
+                if (rewriteSpan != null) {
+                    rewriteSpan.failure(invalidOutput);
+                }
+                saveRewriteLog(spanContext(rewriteSpan, traceContext),
+                        conversationId, userId, assistantMessageId, modelMessages,
                         rawOutput, duration, 0, "Query rewriter returned invalid JSON");
                 return fallback(original, trigger, duration, true);
             }
-            saveRewriteLog(conversationId, userId, assistantMessageId, modelMessages,
+            Map<String, Object> attributes = new LinkedHashMap<>();
+            attributes.put("mode", parsed.getMode());
+            attributes.put("queryCount", parsed.getQueries().size());
+            attributes.put("inputTokens", tokenEstimator.estimateMessages(modelMessages));
+            attributes.put("outputTokens", tokenEstimator.estimateText(rawOutput));
+            if (rewriteSpan != null) {
+                rewriteSpan.success(attributes);
+            }
+            saveRewriteLog(spanContext(rewriteSpan, traceContext),
+                    conversationId, userId, assistantMessageId, modelMessages,
                     rawOutput, duration, 1, null);
             log.info("AI query preprocessing completed, conversationId={}, mode={}, queryCount={}, "
                             + "originalChars={}, rewrittenChars={}, rewriteMs={}",
@@ -122,12 +182,29 @@ public class AiQueryPreprocessor {
             return parsed;
         } catch (Exception e) {
             long duration = System.currentTimeMillis() - startedAt;
-            saveRewriteLog(conversationId, userId, assistantMessageId, modelMessages,
+            if (rewriteSpan != null) {
+                rewriteSpan.failure(e);
+            }
+            saveRewriteLog(spanContext(rewriteSpan, traceContext),
+                    conversationId, userId, assistantMessageId, modelMessages,
                     rawOutput, duration, 0, e.getMessage());
             log.warn("AI query preprocessing failed; safe fallback will be used, conversationId={}, reason={}",
                     conversationId, e.getMessage());
             return fallback(original, trigger, duration, true);
         }
+    }
+
+    private AiTraceSpanScope startTraceSpan(AiTraceContext traceContext,
+                                            String stageName,
+                                            Map<String, Object> attributes) {
+        if (aiTraceService == null || traceContext == null) {
+            return null;
+        }
+        return aiTraceService.startSpan(traceContext, stageName, attributes);
+    }
+
+    private AiTraceContext spanContext(AiTraceSpanScope scope, AiTraceContext fallback) {
+        return scope == null ? fallback : scope.getContext();
     }
 
     private AiRetrievalQueryPlan passThrough(String original) {
@@ -334,7 +411,8 @@ public class AiQueryPreprocessor {
                 validModelOutput, rewriteMs, originalChars, rewrittenChars);
     }
 
-    private void saveRewriteLog(Long conversationId, Long userId, Long assistantMessageId,
+    private void saveRewriteLog(AiTraceContext traceContext,
+                                Long conversationId, Long userId, Long assistantMessageId,
                                 List<AiPromptMessage> messages, String output, long totalMs,
                                 int success, String errorMessage) {
         if (conversationId == null && userId == null) {
@@ -345,6 +423,7 @@ public class AiQueryPreprocessor {
             requestLog.setConversationId(conversationId);
             requestLog.setUserId(userId);
             requestLog.setAssistantMessageId(assistantMessageId);
+            applyTrace(requestLog, traceContext);
             requestLog.setRequestType("query_rewrite");
             requestLog.setProvider(chatProperties.getProvider());
             requestLog.setModel(chatProperties.getModel());
@@ -357,6 +436,16 @@ public class AiQueryPreprocessor {
         } catch (Exception e) {
             log.error("Failed to save query rewrite request log, conversationId={}", conversationId, e);
         }
+    }
+
+    private void applyTrace(AiRequestLog requestLog, AiTraceContext traceContext) {
+        if (traceContext == null || !traceContext.isValid()) {
+            return;
+        }
+        requestLog.setRequestId(traceContext.getRequestId());
+        requestLog.setTraceId(traceContext.getTraceId());
+        requestLog.setSpanId(traceContext.getCurrentSpanId());
+        requestLog.setParentSpanId(traceContext.getParentSpanId());
     }
 
     private String limitError(String errorMessage) {

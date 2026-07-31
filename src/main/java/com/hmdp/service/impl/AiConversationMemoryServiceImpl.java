@@ -5,6 +5,8 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.hmdp.ai.AiChatModelClient;
 import com.hmdp.ai.AiPromptMessage;
 import com.hmdp.ai.AiTokenEstimator;
+import com.hmdp.ai.AiTraceContext;
+import com.hmdp.ai.AiTraceSpanScope;
 import com.hmdp.config.AiChatProperties;
 import com.hmdp.config.AiMemoryProperties;
 import com.hmdp.entity.AiConversation;
@@ -14,6 +16,7 @@ import com.hmdp.mapper.AiConversationMapper;
 import com.hmdp.service.IAiConversationMemoryService;
 import com.hmdp.service.IAiMessageService;
 import com.hmdp.service.IAiRequestLogService;
+import com.hmdp.service.IAiTraceService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -47,15 +50,25 @@ public class AiConversationMemoryServiceImpl implements IAiConversationMemorySer
     @Resource
     private IAiRequestLogService aiRequestLogService;
 
+    @Resource
+    private IAiTraceService aiTraceService;
+
     @Override
     public void summarizeIfNeeded(Long conversationId, Long userId) {
+        summarizeIfNeeded(null, conversationId, userId);
+    }
+
+    @Override
+    public void summarizeIfNeeded(AiTraceContext traceContext, Long conversationId, Long userId) {
         long startedAt = System.currentTimeMillis();
         AtomicLong firstTokenMs = new AtomicLong(-1L);
         int inputTokens = 0;
         StringBuilder generatedSummary = new StringBuilder();
+        AiTraceContext requestLogContext = traceContext;
         try {
             AiConversation conversation = aiConversationMapper.selectById(conversationId);
             if (conversation == null || !userId.equals(conversation.getUserId())) {
+                completeTrace(traceContext, "NO_ACTION");
                 return;
             }
             List<AiMessage> unsummarized = findUnsummarizedMessages(conversationId, userId,
@@ -63,6 +76,7 @@ public class AiConversationMemoryServiceImpl implements IAiConversationMemorySer
             int triggerCount = Math.max(1, aiMemoryProperties.getSummaryTriggerMessageCount());
             int recentLimit = Math.max(1, aiChatProperties.getContextMessageLimit());
             if (unsummarized.size() <= triggerCount || unsummarized.size() <= recentLimit) {
+                completeTrace(traceContext, "NO_ACTION");
                 return;
             }
 
@@ -71,12 +85,27 @@ public class AiConversationMemoryServiceImpl implements IAiConversationMemorySer
             List<AiPromptMessage> summaryPrompt = buildSummaryPrompt(conversation.getSummary(), messagesToSummarize);
             inputTokens = aiTokenEstimator.estimateMessages(summaryPrompt);
             final long modelStartedAt = System.currentTimeMillis();
-            aiChatModelClient.stream(summaryPrompt, delta -> {
-                if (firstTokenMs.compareAndSet(-1L, System.currentTimeMillis() - modelStartedAt)) {
-                    // Capture the first-token timing only once.
+            AiTraceSpanScope modelSpan = traceContext == null || aiTraceService == null
+                    ? null : aiTraceService.startSpan(traceContext, "SUMMARY_MODEL");
+            AiTraceContext logContext = modelSpan == null ? traceContext : modelSpan.getContext();
+            requestLogContext = logContext;
+            try {
+                aiChatModelClient.stream(summaryPrompt, delta -> {
+                    if (firstTokenMs.compareAndSet(-1L, System.currentTimeMillis() - modelStartedAt)
+                            && traceContext != null) {
+                        aiTraceService.markFirstToken(traceContext);
+                    }
+                    generatedSummary.append(delta);
+                });
+                if (modelSpan != null) {
+                    modelSpan.success();
                 }
-                generatedSummary.append(delta);
-            });
+            } catch (Exception e) {
+                if (modelSpan != null) {
+                    modelSpan.failure(e);
+                }
+                throw e;
+            }
 
             String summary = limitText(generatedSummary.toString(), aiMemoryProperties.getMaxSummaryChars());
             if (StrUtil.isBlank(summary)) {
@@ -86,16 +115,20 @@ public class AiConversationMemoryServiceImpl implements IAiConversationMemorySer
             conversation.setSummary(summary);
             conversation.setSummaryUpToMessageId(lastSummarized.getId());
             aiConversationMapper.updateById(conversation);
-            saveRequestLog(conversationId, userId, "summary", null, 0L, 0L,
+            saveRequestLog(logContext, conversationId, userId, "summary", null, 0L, 0L,
                     firstTokenMs.get(), System.currentTimeMillis() - modelStartedAt,
                     inputTokens, aiTokenEstimator.estimateText(summary), 1, null);
             log.info("AI conversation summary updated, conversationId={}, summaryUpToMessageId={}",
                     conversationId, lastSummarized.getId());
+            completeTrace(traceContext, "SUMMARIZED");
         } catch (Exception e) {
             log.warn("AI conversation summary skipped, conversationId={}", conversationId, e);
-            saveRequestLog(conversationId, userId, "summary", null, 0L, 0L,
+            saveRequestLog(requestLogContext, conversationId, userId, "summary", null, 0L, 0L,
                     firstTokenMs.get(), System.currentTimeMillis() - startedAt,
                     inputTokens, aiTokenEstimator.estimateText(generatedSummary.toString()), 0, e.getMessage());
+            if (traceContext != null && aiTraceService != null) {
+                aiTraceService.failTrace(traceContext, "SUMMARY_MODEL", e);
+            }
         }
     }
 
@@ -135,7 +168,8 @@ public class AiConversationMemoryServiceImpl implements IAiConversationMemorySer
         return text.length() <= safeLimit ? text : text.substring(0, safeLimit) + "...";
     }
 
-    private void saveRequestLog(Long conversationId, Long userId, String requestType, Long assistantMessageId,
+    private void saveRequestLog(AiTraceContext traceContext,
+                                Long conversationId, Long userId, String requestType, Long assistantMessageId,
                                 long retrievalMs, long toolMs, long firstTokenMs, long totalMs,
                                 int inputTokens, int outputTokens, int success, String errorMessage) {
         try {
@@ -143,6 +177,12 @@ public class AiConversationMemoryServiceImpl implements IAiConversationMemorySer
             requestLog.setConversationId(conversationId);
             requestLog.setUserId(userId);
             requestLog.setAssistantMessageId(assistantMessageId);
+            if (traceContext != null && traceContext.isValid()) {
+                requestLog.setRequestId(traceContext.getRequestId());
+                requestLog.setTraceId(traceContext.getTraceId());
+                requestLog.setSpanId(traceContext.getCurrentSpanId());
+                requestLog.setParentSpanId(traceContext.getParentSpanId());
+            }
             requestLog.setRequestType(requestType);
             requestLog.setProvider(aiChatProperties.getProvider());
             requestLog.setModel(aiChatProperties.getModel());
@@ -157,6 +197,12 @@ public class AiConversationMemoryServiceImpl implements IAiConversationMemorySer
             aiRequestLogService.save(requestLog);
         } catch (Exception logError) {
             log.error("Failed to save AI request log, conversationId={}", conversationId, logError);
+        }
+    }
+
+    private void completeTrace(AiTraceContext traceContext, String outcome) {
+        if (traceContext != null && aiTraceService != null) {
+            aiTraceService.completeTrace(traceContext, outcome);
         }
     }
 }

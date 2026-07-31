@@ -2,6 +2,9 @@ package com.hmdp.service.impl;
 
 import cn.hutool.core.util.StrUtil;
 import com.hmdp.ai.AiToolExecution;
+import com.hmdp.ai.AiTraceContext;
+import com.hmdp.ai.AiTraceIds;
+import com.hmdp.ai.AiTraceSpanScope;
 import com.hmdp.ai.ShopKnowledge;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.AiToolLog;
@@ -10,6 +13,7 @@ import com.hmdp.entity.Shop;
 import com.hmdp.entity.Voucher;
 import com.hmdp.service.IAiReadOnlyToolService;
 import com.hmdp.service.IAiToolLogService;
+import com.hmdp.service.IAiTraceService;
 import com.hmdp.service.IBlogService;
 import com.hmdp.service.IShopService;
 import com.hmdp.service.IVoucherService;
@@ -50,8 +54,18 @@ public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
     @Resource
     private IAiToolLogService aiToolLogService;
 
+    @Resource
+    private IAiTraceService aiTraceService;
+
     @Override
     public List<AiToolExecution> executeRelevantTools(Long conversationId, Long userId, String question,
+                                                       Double x, Double y, List<ShopKnowledge> retrievedShops) {
+        return executeRelevantTools(null, conversationId, userId, question, x, y, retrievedShops);
+    }
+
+    @Override
+    public List<AiToolExecution> executeRelevantTools(AiTraceContext traceContext,
+                                                       Long conversationId, Long userId, String question,
                                                        Double x, Double y, List<ShopKnowledge> retrievedShops) {
         List<String> toolNames = new ArrayList<>();
         toolNames.add("shopDetail");
@@ -64,7 +78,7 @@ public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
         if (x != null && y != null && containsNearbyIntent(question)) {
             toolNames.add("nearbyShopSearch");
         }
-        return executeTools(conversationId, userId, toolNames, x, y, retrievedShops);
+        return executeTools(traceContext, conversationId, userId, toolNames, x, y, retrievedShops);
     }
 
     @Override
@@ -82,6 +96,13 @@ public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
     @Override
     public List<AiToolExecution> executeTools(Long conversationId, Long userId, List<String> toolNames,
                                               Double x, Double y, List<ShopKnowledge> retrievedShops) {
+        return executeTools(null, conversationId, userId, toolNames, x, y, retrievedShops);
+    }
+
+    @Override
+    public List<AiToolExecution> executeTools(AiTraceContext traceContext,
+                                              Long conversationId, Long userId, List<String> toolNames,
+                                              Double x, Double y, List<ShopKnowledge> retrievedShops) {
         if (toolNames == null || toolNames.isEmpty()) {
             return Collections.emptyList();
         }
@@ -92,21 +113,21 @@ public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
                 continue;
             }
             if ("shopDetail".equals(toolName) && !shopIds.isEmpty()) {
-                addIfPresent(executions, invoke(conversationId, userId, toolName,
+                addIfPresent(executions, invoke(traceContext, conversationId, userId, toolName,
                         "shopIds=" + shopIds, () -> queryShopDetails(shopIds)));
             }
             if ("voucherQuery".equals(toolName) && !shopIds.isEmpty()) {
-                addIfPresent(executions, invoke(conversationId, userId, toolName,
+                addIfPresent(executions, invoke(traceContext, conversationId, userId, toolName,
                         "shopIds=" + shopIds, () -> queryCurrentVouchers(shopIds)));
             }
             if ("blogSearch".equals(toolName) && !shopIds.isEmpty()) {
-                addIfPresent(executions, invoke(conversationId, userId, toolName,
+                addIfPresent(executions, invoke(traceContext, conversationId, userId, toolName,
                         "shopIds=" + shopIds, () -> queryPopularBlogs(shopIds)));
             }
             if ("nearbyShopSearch".equals(toolName) && x != null && y != null) {
                 Integer typeId = firstCandidateTypeId(retrievedShops);
                 if (typeId != null) {
-                    addIfPresent(executions, invoke(conversationId, userId, toolName,
+                    addIfPresent(executions, invoke(traceContext, conversationId, userId, toolName,
                             "typeId=" + typeId + ",locationProvided=true",
                             () -> queryNearbyShops(typeId, x, y)));
                 }
@@ -246,29 +267,54 @@ public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
         }
     }
 
-    private AiToolExecution invoke(Long conversationId, Long userId, String toolName,
+    private AiToolExecution invoke(AiTraceContext traceContext,
+                                   Long conversationId, Long userId, String toolName,
                                    String requestContent, ToolSupplier supplier) {
+        String toolCallId = AiTraceIds.toolCallId();
+        Map<String, Object> spanAttributes = new HashMap<>();
+        spanAttributes.put("toolName", toolName);
+        spanAttributes.put("toolCallId", toolCallId);
+        AiTraceSpanScope toolSpan = traceContext == null || aiTraceService == null
+                ? null : aiTraceService.startSpan(traceContext, "TOOL_CALL", spanAttributes);
+        AiTraceContext toolContext = toolSpan == null ? traceContext : toolSpan.getContext();
         long start = System.currentTimeMillis();
         try {
             String resultContent = supplier.get();
-            saveLog(conversationId, userId, toolName, requestContent, resultContent, 1,
+            if (toolSpan != null) {
+                Map<String, Object> successAttributes = new HashMap<>(spanAttributes);
+                successAttributes.put("resultChars", resultContent == null ? 0 : resultContent.length());
+                toolSpan.success(successAttributes);
+            }
+            saveLog(toolContext, toolCallId, conversationId, userId, toolName, requestContent, resultContent, 1,
                     System.currentTimeMillis() - start);
             return new AiToolExecution(toolName, resultContent);
         } catch (Exception e) {
             long duration = System.currentTimeMillis() - start;
             String error = "Tool execution failed: " + e.getClass().getSimpleName();
             log.warn("AI read-only tool failed, toolName={}, conversationId={}", toolName, conversationId, e);
-            saveLog(conversationId, userId, toolName, requestContent, error, 0, duration);
+            if (toolSpan != null) {
+                toolSpan.failure(e);
+            }
+            saveLog(toolContext, toolCallId, conversationId, userId, toolName, requestContent, error, 0, duration);
             return null;
         }
     }
 
-    private void saveLog(Long conversationId, Long userId, String toolName, String requestContent,
+    private void saveLog(AiTraceContext traceContext, String toolCallId,
+                         Long conversationId, Long userId, String toolName, String requestContent,
                          String resultContent, int success, long durationMs) {
         try {
             AiToolLog toolLog = new AiToolLog();
             toolLog.setConversationId(conversationId);
             toolLog.setUserId(userId);
+            if (traceContext != null && traceContext.isValid()) {
+                toolLog.setAssistantMessageId(traceContext.getAssistantMessageId());
+                toolLog.setRequestId(traceContext.getRequestId());
+                toolLog.setTraceId(traceContext.getTraceId());
+                toolLog.setSpanId(traceContext.getCurrentSpanId());
+                toolLog.setParentSpanId(traceContext.getParentSpanId());
+            }
+            toolLog.setToolCallId(toolCallId);
             toolLog.setToolName(toolName);
             toolLog.setRequestContent(requestContent);
             toolLog.setResultContent(resultContent);

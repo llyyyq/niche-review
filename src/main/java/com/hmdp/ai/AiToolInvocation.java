@@ -4,6 +4,8 @@ import java.util.List;
 
 public class AiToolInvocation {
 
+    private final AiTraceContext traceContext;
+    private final String toolCallId;
     private final Long conversationId;
     private final Long userId;
     private final String toolName;
@@ -12,8 +14,11 @@ public class AiToolInvocation {
     private final Double y;
     private final List<ShopKnowledge> retrievedShops;
 
-    public AiToolInvocation(Long conversationId, Long userId, String toolName, String question,
+    public AiToolInvocation(AiTraceContext traceContext,
+                            Long conversationId, Long userId, String toolName, String question,
                             Double x, Double y, List<ShopKnowledge> retrievedShops) {
+        this.traceContext = traceContext;
+        this.toolCallId = AiTraceIds.toolCallId();
         this.conversationId = conversationId;
         this.userId = userId;
         this.toolName = toolName;
@@ -23,6 +28,8 @@ public class AiToolInvocation {
         this.retrievedShops = retrievedShops;
     }
 
+    public AiTraceContext getTraceContext() { return traceContext; }
+    public String getToolCallId() { return toolCallId; }
     public Long getConversationId() { return conversationId; }
     public Long getUserId() { return userId; }
     public String getToolName() { return toolName; }

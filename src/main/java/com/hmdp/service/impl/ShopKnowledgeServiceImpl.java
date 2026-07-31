@@ -2,6 +2,8 @@ package com.hmdp.service.impl;
 
 import cn.hutool.core.util.StrUtil;
 import com.hmdp.ai.EmbeddingModelClient;
+import com.hmdp.ai.AiTraceContext;
+import com.hmdp.ai.AiTraceSpanScope;
 import com.hmdp.ai.QdrantKnowledgeClient;
 import com.hmdp.ai.ShopKnowledge;
 import com.hmdp.config.AiEmbeddingProperties;
@@ -15,6 +17,7 @@ import com.hmdp.service.IShopKnowledgeService;
 import com.hmdp.service.IShopService;
 import com.hmdp.service.IShopTypeService;
 import com.hmdp.service.IVoucherService;
+import com.hmdp.service.IAiTraceService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -71,6 +74,9 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
     @Resource
     private AiKnowledgeProperties knowledgeProperties;
 
+    @Resource
+    private IAiTraceService aiTraceService;
+
     @Override
     public int rebuildShopKnowledge() {
         List<Shop> shops = shopService.list();
@@ -125,7 +131,13 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
 
     @Override
     public List<ShopKnowledge> searchRelevantShops(List<String> questions) {
-        return searchRelevantShops(questions,
+        return searchRelevantShops(null, questions,
+                Boolean.TRUE.equals(knowledgeProperties.getKeywordFallbackEnabled()));
+    }
+
+    @Override
+    public List<ShopKnowledge> searchRelevantShops(AiTraceContext traceContext, List<String> questions) {
+        return searchRelevantShops(traceContext, questions,
                 Boolean.TRUE.equals(knowledgeProperties.getKeywordFallbackEnabled()));
     }
 
@@ -136,39 +148,83 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
 
     @Override
     public List<ShopKnowledge> searchRelevantShops(List<String> questions, boolean keywordFallbackEnabled) {
+        return searchRelevantShops(null, questions, keywordFallbackEnabled);
+    }
+
+    private List<ShopKnowledge> searchRelevantShops(AiTraceContext traceContext, List<String> questions,
+                                                     boolean keywordFallbackEnabled) {
         List<String> validQuestions = validQuestions(questions);
         if (validQuestions.isEmpty()) {
             return Collections.emptyList();
         }
+        Map<String, Object> retrievalAttributes = new LinkedHashMap<>();
+        retrievalAttributes.put("queryCount", validQuestions.size());
+        retrievalAttributes.put("keywordFallbackEnabled", keywordFallbackEnabled);
+        AiTraceSpanScope retrievalSpan = startSpan(traceContext, "RETRIEVAL", retrievalAttributes);
+        AiTraceContext retrievalContext = contextOf(retrievalSpan, traceContext);
         try {
-            List<List<Float>> vectors = embeddingModelClient.embed(validQuestions);
+            AiTraceSpanScope embeddingSpan = startSpan(retrievalContext, "EMBEDDING",
+                    Collections.<String, Object>singletonMap("queryCount", validQuestions.size()));
+            List<List<Float>> vectors;
+            try {
+                vectors = embeddingModelClient.embed(validQuestions);
+                success(embeddingSpan, Collections.<String, Object>singletonMap("vectorCount", vectors.size()));
+            } catch (Exception e) {
+                failure(embeddingSpan, e);
+                throw e;
+            }
             if (vectors.size() != validQuestions.size()) {
                 throw new IllegalStateException("Embedding count does not match query count");
             }
             List<List<ShopKnowledge>> resultGroups = new ArrayList<>(validQuestions.size());
             for (int index = 0; index < validQuestions.size(); index++) {
                 resultGroups.add(searchSingleQuery(
+                        retrievalContext,
                         validQuestions.get(index),
                         vectors.get(index),
                         keywordFallbackEnabled
                 ));
             }
-            return mergeRoundRobin(resultGroups);
+            List<ShopKnowledge> merged = mergeWithTrace(retrievalContext, resultGroups);
+            success(retrievalSpan, retrievalResultAttributes(
+                    merged, false, validQuestions.size(), keywordFallbackEnabled));
+            return merged;
         } catch (Exception e) {
             // Retrieval is an enhancement. A temporary vector/embedding failure must not stop the chat service.
             log.warn("Vector retrieval skipped, attempting keyword fallback: {}", e.getMessage());
             List<List<ShopKnowledge>> fallbackGroups = new ArrayList<>(validQuestions.size());
             for (String question : validQuestions) {
-                fallbackGroups.add(keywordFallback(question, keywordFallbackEnabled));
+                AiTraceSpanScope keywordSpan = startSpan(retrievalContext, "KEYWORD_SEARCH",
+                        Collections.<String, Object>singletonMap("reason", "vectorFailure"));
+                try {
+                    List<ShopKnowledge> fallback = keywordFallback(question, keywordFallbackEnabled);
+                    fallbackGroups.add(fallback);
+                    success(keywordSpan, Collections.<String, Object>singletonMap("resultCount", fallback.size()));
+                } catch (RuntimeException fallbackError) {
+                    failure(keywordSpan, fallbackError);
+                    throw fallbackError;
+                }
             }
-            return mergeRoundRobin(fallbackGroups);
+            List<ShopKnowledge> merged = mergeWithTrace(retrievalContext, fallbackGroups);
+            success(retrievalSpan, retrievalResultAttributes(
+                    merged, true, validQuestions.size(), keywordFallbackEnabled));
+            return merged;
         }
     }
 
-    private List<ShopKnowledge> searchSingleQuery(String question, List<Float> vector,
+    private List<ShopKnowledge> searchSingleQuery(AiTraceContext traceContext,
+                                                   String question, List<Float> vector,
                                                    boolean keywordFallbackEnabled) throws Exception {
-        List<QdrantKnowledgeClient.QdrantSearchResult> results = qdrantKnowledgeClient.search(
-                knowledgeProperties.getShopCollection(), vector, knowledgeProperties.getRetrieveLimit());
+        AiTraceSpanScope vectorSpan = startSpan(traceContext, "QDRANT_SEARCH");
+        List<QdrantKnowledgeClient.QdrantSearchResult> results;
+        try {
+            results = qdrantKnowledgeClient.search(
+                    knowledgeProperties.getShopCollection(), vector, knowledgeProperties.getRetrieveLimit());
+            success(vectorSpan, Collections.<String, Object>singletonMap("resultCount", results.size()));
+        } catch (Exception e) {
+            failure(vectorSpan, e);
+            throw e;
+        }
         List<ShopKnowledge> vectorShops = new ArrayList<>(results.size());
         for (QdrantKnowledgeClient.QdrantSearchResult result : results) {
             Map<String, Object> payload = result.getPayload();
@@ -188,7 +244,15 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
         }
 
         List<ShopKnowledge> constrainedVectorShops = applyStructuredConstraints(vectorShops, context);
-        List<ShopKnowledge> keywordShops = keywordFallback(context);
+        AiTraceSpanScope keywordSpan = startSpan(traceContext, "KEYWORD_SEARCH");
+        List<ShopKnowledge> keywordShops;
+        try {
+            keywordShops = keywordFallback(context);
+            success(keywordSpan, Collections.<String, Object>singletonMap("resultCount", keywordShops.size()));
+        } catch (RuntimeException e) {
+            failure(keywordSpan, e);
+            throw e;
+        }
         if (!keywordShops.isEmpty()) {
             List<ShopKnowledge> merged = mergeKnowledge(keywordShops, constrainedVectorShops);
             log.info("Hybrid retrieval merged keyword and vector results, questionLength={}, "
@@ -237,6 +301,68 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
             }
         }
         return new ArrayList<>(merged.values());
+    }
+
+    private List<ShopKnowledge> mergeWithTrace(AiTraceContext traceContext,
+                                                List<List<ShopKnowledge>> groups) {
+        AiTraceSpanScope mergeSpan = startSpan(traceContext, "RESULT_MERGE",
+                Collections.<String, Object>singletonMap("groupCount", groups.size()));
+        try {
+            List<ShopKnowledge> merged = mergeRoundRobin(groups);
+            success(mergeSpan, retrievalResultAttributes(merged, false));
+            return merged;
+        } catch (RuntimeException e) {
+            failure(mergeSpan, e);
+            throw e;
+        }
+    }
+
+    private Map<String, Object> retrievalResultAttributes(List<ShopKnowledge> shops, boolean degraded) {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("resultCount", shops == null ? 0 : shops.size());
+        attributes.put("degradedToKeyword", degraded);
+        if (shops != null && !shops.isEmpty()) {
+            attributes.put("shopIds", shops.stream()
+                    .map(ShopKnowledge::getShopId)
+                    .collect(Collectors.toList()));
+        }
+        return attributes;
+    }
+
+    private Map<String, Object> retrievalResultAttributes(List<ShopKnowledge> shops,
+                                                          boolean degraded,
+                                                          int queryCount,
+                                                          boolean keywordFallbackEnabled) {
+        Map<String, Object> attributes = retrievalResultAttributes(shops, degraded);
+        attributes.put("queryCount", queryCount);
+        attributes.put("keywordFallbackEnabled", keywordFallbackEnabled);
+        return attributes;
+    }
+
+    private AiTraceSpanScope startSpan(AiTraceContext context, String stageName) {
+        return startSpan(context, stageName, Collections.<String, Object>emptyMap());
+    }
+
+    private AiTraceSpanScope startSpan(AiTraceContext context, String stageName,
+                                       Map<String, Object> attributes) {
+        return context == null || aiTraceService == null
+                ? null : aiTraceService.startSpan(context, stageName, attributes);
+    }
+
+    private AiTraceContext contextOf(AiTraceSpanScope scope, AiTraceContext fallback) {
+        return scope == null ? fallback : scope.getContext();
+    }
+
+    private void success(AiTraceSpanScope scope, Map<String, Object> attributes) {
+        if (scope != null) {
+            scope.success(attributes);
+        }
+    }
+
+    private void failure(AiTraceSpanScope scope, Throwable error) {
+        if (scope != null) {
+            scope.failure(error);
+        }
     }
 
     private boolean isReliableVectorResult(List<ShopKnowledge> shops) {

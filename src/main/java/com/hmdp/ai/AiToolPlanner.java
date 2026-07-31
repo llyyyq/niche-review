@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hmdp.config.AiChatProperties;
 import com.hmdp.entity.AiRequestLog;
 import com.hmdp.service.IAiRequestLogService;
+import com.hmdp.service.IAiTraceService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -14,6 +15,8 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @Slf4j
 @Component
@@ -34,11 +37,24 @@ public class AiToolPlanner {
     @Resource
     private IAiRequestLogService aiRequestLogService;
 
+    @Resource
+    private IAiTraceService aiTraceService;
+
     public AiToolPlan plan(Long conversationId, Long userId, String question, List<String> availableTools, List<String> usedTools,
+                           List<AiToolExecution> previousResults) {
+        return plan(null, conversationId, userId, question, availableTools, usedTools, previousResults);
+    }
+
+    public AiToolPlan plan(AiTraceContext traceContext,
+                           Long conversationId, Long userId, String question,
+                           List<String> availableTools, List<String> usedTools,
                            List<AiToolExecution> previousResults) {
         if (availableTools == null || availableTools.isEmpty()) {
             return new AiToolPlan(true, Collections.<String>emptyList());
         }
+        AiTraceSpanScope plannerSpan = traceContext == null || aiTraceService == null
+                ? null : aiTraceService.startSpan(traceContext, "AGENT_PLAN");
+        AiTraceContext plannerContext = plannerSpan == null ? traceContext : plannerSpan.getContext();
         long startedAt = System.currentTimeMillis();
         AtomicLong firstTokenMs = new AtomicLong(-1L);
         List<AiPromptMessage> messages = Arrays.asList(
@@ -52,12 +68,25 @@ public class AiToolPlanner {
                 output.append(delta);
             });
             AiToolPlan plan = parsePlan(output.toString(), availableTools);
-            savePlanLog(conversationId, userId, messages, output.toString(), firstTokenMs.get(),
+            if (plan == null) {
+                if (plannerSpan != null) {
+                    plannerSpan.failure(new IllegalStateException("Planner returned invalid JSON"));
+                }
+            } else if (plannerSpan != null) {
+                Map<String, Object> attributes = new LinkedHashMap<>();
+                attributes.put("finished", plan.isFinished());
+                attributes.put("toolCount", plan.getToolNames().size());
+                plannerSpan.success(attributes);
+            }
+            savePlanLog(plannerContext, conversationId, userId, messages, output.toString(), firstTokenMs.get(),
                     System.currentTimeMillis() - startedAt, plan == null ? 0 : 1,
                     plan == null ? "Planner returned invalid JSON" : null);
             return plan;
         } catch (Exception e) {
-            savePlanLog(conversationId, userId, messages, output.toString(), firstTokenMs.get(),
+            if (plannerSpan != null) {
+                plannerSpan.failure(e);
+            }
+            savePlanLog(plannerContext, conversationId, userId, messages, output.toString(), firstTokenMs.get(),
                     System.currentTimeMillis() - startedAt, 0, e.getMessage());
             log.warn("AI tool planning failed; legacy routing will be used: {}", e.getMessage());
             return null;
@@ -109,12 +138,20 @@ public class AiToolPlanner {
         return new AiToolPlan(tools.isEmpty(), tools);
     }
 
-    private void savePlanLog(Long conversationId, Long userId, List<AiPromptMessage> messages, String output,
+    private void savePlanLog(AiTraceContext traceContext,
+                             Long conversationId, Long userId, List<AiPromptMessage> messages, String output,
                              long firstTokenMs, long totalMs, int success, String errorMessage) {
         try {
             AiRequestLog requestLog = new AiRequestLog();
             requestLog.setConversationId(conversationId);
             requestLog.setUserId(userId);
+            if (traceContext != null && traceContext.isValid()) {
+                requestLog.setAssistantMessageId(traceContext.getAssistantMessageId());
+                requestLog.setRequestId(traceContext.getRequestId());
+                requestLog.setTraceId(traceContext.getTraceId());
+                requestLog.setSpanId(traceContext.getCurrentSpanId());
+                requestLog.setParentSpanId(traceContext.getParentSpanId());
+            }
             requestLog.setRequestType("agent_plan");
             requestLog.setProvider(aiChatProperties.getProvider());
             requestLog.setModel(aiChatProperties.getModel());

@@ -2,6 +2,7 @@ package com.hmdp.ai;
 
 import com.hmdp.config.AiAgentProperties;
 import com.hmdp.service.IAiReadOnlyToolService;
+import com.hmdp.service.IAiTraceService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -12,6 +13,8 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @Slf4j
 @Component
@@ -26,18 +29,52 @@ public class AiAgentRunner {
     @Resource
     private AiAgentProperties aiAgentProperties;
 
+    @Resource
+    private IAiTraceService aiTraceService;
+
     @Autowired(required = false)
     private List<AiExternalToolProvider> externalToolProviders = Collections.emptyList();
 
     public List<AiToolExecution> run(Long conversationId, Long userId, String question,
                                      Double x, Double y, List<ShopKnowledge> retrievedShops) {
+        return run(null, conversationId, userId, question, x, y, retrievedShops);
+    }
+
+    public List<AiToolExecution> run(AiTraceContext traceContext,
+                                     Long conversationId, Long userId, String question,
+                                     Double x, Double y, List<ShopKnowledge> retrievedShops) {
+        AiTraceSpanScope routeSpan = traceContext == null || aiTraceService == null
+                ? null : aiTraceService.startSpan(traceContext, "AGENT_ROUTE");
+        AiTraceContext routeContext = routeSpan == null ? traceContext : routeSpan.getContext();
+        try {
+            List<AiToolExecution> executions = doRun(routeContext, conversationId, userId,
+                    question, x, y, retrievedShops);
+            if (routeSpan != null) {
+                Map<String, Object> attributes = new LinkedHashMap<>();
+                attributes.put("toolCount", executions.size());
+                routeSpan.success(attributes);
+            }
+            return executions;
+        } catch (RuntimeException e) {
+            if (routeSpan != null) {
+                routeSpan.failure(e);
+            }
+            throw e;
+        }
+    }
+
+    private List<AiToolExecution> doRun(AiTraceContext traceContext,
+                                        Long conversationId, Long userId, String question,
+                                        Double x, Double y, List<ShopKnowledge> retrievedShops) {
         if (!Boolean.TRUE.equals(aiAgentProperties.getEnabled())) {
-            return aiReadOnlyToolService.executeRelevantTools(conversationId, userId, question, x, y, retrievedShops);
+            return aiReadOnlyToolService.executeRelevantTools(
+                    traceContext, conversationId, userId, question, x, y, retrievedShops);
         }
         if (Boolean.TRUE.equals(aiAgentProperties.getFastPathEnabled())
                 && aiReadOnlyToolService.shouldUseDirectToolRouting(question, x, y)) {
             log.debug("AI direct tool routing selected, conversationId={}", conversationId);
-            return aiReadOnlyToolService.executeRelevantTools(conversationId, userId, question, x, y, retrievedShops);
+            return aiReadOnlyToolService.executeRelevantTools(
+                    traceContext, conversationId, userId, question, x, y, retrievedShops);
         }
         if (Boolean.TRUE.equals(aiAgentProperties.getFastPathEnabled()) && !requiresPlanning(question)) {
             log.debug("AI retrieval-only path selected, conversationId={}", conversationId);
@@ -48,12 +85,13 @@ public class AiAgentRunner {
         Set<String> usedTools = new LinkedHashSet<>();
         int maxSteps = Math.max(1, aiAgentProperties.getMaxSteps());
         for (int step = 1; step <= maxSteps; step++) {
-            AiToolPlan plan = aiToolPlanner.plan(conversationId, userId, question,
+            AiToolPlan plan = aiToolPlanner.plan(traceContext, conversationId, userId, question,
                     availableTools, new ArrayList<>(usedTools), executions);
             if (plan == null) {
                 log.info("Agent planning fell back to legacy routing, conversationId={}", conversationId);
                 return executions.isEmpty()
-                        ? aiReadOnlyToolService.executeRelevantTools(conversationId, userId, question, x, y, retrievedShops)
+                        ? aiReadOnlyToolService.executeRelevantTools(
+                                traceContext, conversationId, userId, question, x, y, retrievedShops)
                         : executions;
             }
             if (plan.isFinished()) {
@@ -65,7 +103,8 @@ public class AiAgentRunner {
                 log.debug("Agent terminated because no executable tool remained, conversationId={}, step={}", conversationId, step);
                 return executions;
             }
-            List<AiToolExecution> stepResults = executeTools(conversationId, userId, requested, question, x, y, retrievedShops);
+            List<AiToolExecution> stepResults = executeTools(
+                    traceContext, conversationId, userId, requested, question, x, y, retrievedShops);
             executions.addAll(stepResults);
             usedTools.addAll(requested);
         }
@@ -114,7 +153,8 @@ public class AiAgentRunner {
         return selected;
     }
 
-    private List<AiToolExecution> executeTools(Long conversationId, Long userId, List<String> toolNames,
+    private List<AiToolExecution> executeTools(AiTraceContext traceContext,
+                                               Long conversationId, Long userId, List<String> toolNames,
                                                String question, Double x, Double y, List<ShopKnowledge> retrievedShops) {
         List<String> localTools = new ArrayList<>();
         List<AiToolExecution> results = new ArrayList<>();
@@ -123,9 +163,11 @@ public class AiAgentRunner {
                 localTools.add(toolName);
                 continue;
             }
-            executeExternalTool(results, new AiToolInvocation(conversationId, userId, toolName, question, x, y, retrievedShops));
+            executeExternalTool(results, new AiToolInvocation(
+                    traceContext, conversationId, userId, toolName, question, x, y, retrievedShops));
         }
-        results.addAll(aiReadOnlyToolService.executeTools(conversationId, userId, localTools, x, y, retrievedShops));
+        results.addAll(aiReadOnlyToolService.executeTools(
+                traceContext, conversationId, userId, localTools, x, y, retrievedShops));
         return results;
     }
 
@@ -134,12 +176,24 @@ public class AiAgentRunner {
             if (!provider.supportedToolNames().contains(invocation.getToolName())) {
                 continue;
             }
+            Map<String, Object> attributes = new LinkedHashMap<>();
+            attributes.put("toolName", invocation.getToolName());
+            attributes.put("toolCallId", invocation.getToolCallId());
+            attributes.put("provider", provider.getProviderName());
+            AiTraceSpanScope toolSpan = invocation.getTraceContext() == null || aiTraceService == null
+                    ? null : aiTraceService.startSpan(invocation.getTraceContext(), "TOOL_CALL", attributes);
             try {
                 AiToolExecution result = provider.execute(invocation);
                 if (result != null) {
                     results.add(result);
                 }
+                if (toolSpan != null) {
+                    toolSpan.success(attributes);
+                }
             } catch (Exception e) {
+                if (toolSpan != null) {
+                    toolSpan.failure(e);
+                }
                 log.warn("External AI tool failed, provider={}, toolName={}",
                         provider.getProviderName(), invocation.getToolName(), e);
             }

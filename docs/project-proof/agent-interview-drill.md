@@ -159,7 +159,7 @@
 
 **面试官：** `first_token_ms` 是不是模型 TTFT？
 
-**候选人：** 不是。它从异步生成开始计时，包含查询预处理、检索、工具和 Planner，到第一个 SSE delta 为止。当前可以结合 `retrieval_ms`、`tool_ms` 和估算模型 TTFT 做阶段判断，但还没有统一 `requestId/traceId`，同一会话并发请求时仅靠 `conversationId` 和消息 ID 不够精确。
+**候选人：** 不是。它从异步生成开始计时，包含查询预处理、检索、工具和 Planner，到第一个 SSE delta 为止。当前通过服务端生成的 `requestId/traceId` 关联根记录、阶段 Span、模型日志与工具日志，同一会话并发请求也能精确区分。
 
 **面试官：** 为什么不用 Spring AI、MCP 或多 Agent？
 
@@ -259,7 +259,7 @@
 
 **面试官：** 如果店铺扩大到十万、日请求百万，你先改哪里？
 
-**候选人：** 检索侧把 JVM 关键词扫描迁到 BM25 或其他倒排服务，Qdrant 只负责稠密召回，使用 RRF 和 payload filter 融合；知识同步改为事务 Outbox、队列分区和版本化索引。在线工具服务增加连接池、超时、熔断和缓存，SSE 层做并发限制与取消传播，评测和日志统一到请求级 trace。
+**候选人：** 检索侧可把 JVM 关键词扫描迁到 BM25 或其他倒排服务，Qdrant 负责稠密召回，再使用 RRF 和 payload filter 融合；知识同步改为事务 Outbox、队列分区和版本化索引。在线工具服务增加超时、熔断和缓存，SSE 层继续完善取消传播；现有 `requestId/traceId/spanId` 可作为后续接入 OpenTelemetry 的关联基础。
 
 **面试官：** 最后问一个通用 Agent 问题：什么时候才值得拆成多 Agent？
 
@@ -278,9 +278,9 @@
 - 立即统一简历、README、评测报告和 Git Tag 中的查询重写指标。
 - 对 `syncSend` 结果未知、DLQ 与成功订单竞争、同步任务创建窗口给出清晰的 Outbox 演进方案。
 - 准备一份端到端答案评测设计，明确检索命中不等于答案正确。
-- 能展示一次完整的请求级 Trace，并说明当前缺少统一 `requestId` 的限制。
+- 能展示一次完整的请求级 Trace，并说明 `conversationId`、`requestId`、`traceId`、`spanId` 和 `toolCallId` 的职责边界。
 - 面试时使用“有限步受控工具编排”，不要将当前实现描述为通用自治 Agent 或标准 JSON Schema Function Calling。
 
 ## 候选人收束话术
 
-> 这个项目的主线是可靠 Java 后端加可追溯 AI 导购。交易侧用 Redis、RocketMQ、数据库幂等和状态条件处理高并发与最终一致性；AI 侧用查询预处理、Qdrant 混合检索和只读工具降低幻觉，并用固定评测和日志验证链路。当前实现仍有 MQ 发送结果未知、同步任务创建窗口、端到端答案评测和请求级 Trace 等边界，我能明确指出这些问题，也知道下一步应通过 Outbox、结构化工具错误、答案忠实度评测和统一 trace 标识继续演进。
+> 这个项目的主线是可靠 Java 后端加可追溯 AI 导购。交易侧用 Redis、RocketMQ、数据库幂等和状态条件处理高并发与最终一致性；AI 侧用查询预处理、Qdrant 混合检索和只读工具降低幻觉，并通过固定评测与请求级 Trace 验证链路。当前仍有 MQ 发送结果未知、同步任务创建窗口和端到端答案评测等边界，下一步可通过 Outbox、结构化工具错误和答案忠实度评测继续演进。

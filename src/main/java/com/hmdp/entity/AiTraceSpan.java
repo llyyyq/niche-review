@@ -9,49 +9,22 @@ import java.io.Serializable;
 import java.time.LocalDateTime;
 
 @Data
-@TableName("tb_ai_request_log")
-public class AiRequestLog implements Serializable {
+@TableName("tb_ai_trace_span")
+public class AiTraceSpan implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
     @TableId(value = "id", type = IdType.AUTO)
     private Long id;
-
-    private Long conversationId;
-
-    private Long userId;
-
-    private Long assistantMessageId;
-
-    private String requestId;
-
     private String traceId;
-
     private String spanId;
-
     private String parentSpanId;
-
-    private String requestType;
-
-    private String provider;
-
-    private String model;
-
-    private Long retrievalMs;
-
-    private Long toolMs;
-
-    private Long firstTokenMs;
-
-    private Long totalMs;
-
-    private Integer inputTokens;
-
-    private Integer outputTokens;
-
-    private Integer success;
-
+    private String stageName;
+    private String status;
+    private String attributesJson;
     private String errorMessage;
-
+    private LocalDateTime startedAt;
+    private LocalDateTime completedAt;
+    private Long durationMs;
     private LocalDateTime createTime;
 }

@@ -9,18 +9,26 @@ public class AiPromptBuildResult {
     private final long toolMs;
     private final int inputTokens;
     private final String directResponse;
+    private final String outcome;
 
     public AiPromptBuildResult(List<AiPromptMessage> messages, long retrievalMs, long toolMs, int inputTokens) {
-        this(messages, retrievalMs, toolMs, inputTokens, null);
+        this(messages, retrievalMs, toolMs, inputTokens, null, "ANSWERED");
     }
 
     public AiPromptBuildResult(List<AiPromptMessage> messages, long retrievalMs, long toolMs,
                                int inputTokens, String directResponse) {
+        this(messages, retrievalMs, toolMs, inputTokens, directResponse,
+                directResponse == null ? "ANSWERED" : "NO_EVIDENCE");
+    }
+
+    public AiPromptBuildResult(List<AiPromptMessage> messages, long retrievalMs, long toolMs,
+                               int inputTokens, String directResponse, String outcome) {
         this.messages = messages;
         this.retrievalMs = retrievalMs;
         this.toolMs = toolMs;
         this.inputTokens = inputTokens;
         this.directResponse = directResponse;
+        this.outcome = outcome;
     }
 
     public List<AiPromptMessage> getMessages() {
@@ -41,5 +49,9 @@ public class AiPromptBuildResult {
 
     public String getDirectResponse() {
         return directResponse;
+    }
+
+    public String getOutcome() {
+        return outcome;
     }
 }

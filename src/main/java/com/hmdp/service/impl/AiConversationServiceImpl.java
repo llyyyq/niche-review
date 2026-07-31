@@ -10,6 +10,9 @@ import com.hmdp.ai.AiQueryPreprocessor;
 import com.hmdp.ai.AiRetrievalQueryPlan;
 import com.hmdp.ai.AiTokenEstimator;
 import com.hmdp.ai.AiToolExecution;
+import com.hmdp.ai.AiTraceContext;
+import com.hmdp.ai.AiTraceMdc;
+import com.hmdp.ai.AiTraceSpanScope;
 import com.hmdp.ai.ShopKnowledge;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
@@ -30,6 +33,7 @@ import com.hmdp.service.IAiMessageService;
 import com.hmdp.service.IAiReadOnlyToolService;
 import com.hmdp.service.IAiRequestLogService;
 import com.hmdp.service.IAiToolLogService;
+import com.hmdp.service.IAiTraceService;
 import com.hmdp.service.IShopKnowledgeService;
 import com.hmdp.utils.SystemConstants;
 import com.hmdp.utils.UserHolder;
@@ -96,6 +100,9 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
 
     @Resource
     private AiTokenEstimator aiTokenEstimator;
+
+    @Resource
+    private IAiTraceService aiTraceService;
 
     @Resource(name = "aiChatExecutor")
     private Executor aiChatExecutor;
@@ -279,27 +286,35 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
             throw new IllegalStateException("Failed to update AI conversation activity time");
         }
 
+        AiTraceContext traceContext = aiTraceService.startChatTrace(
+                conversationId, userId, userMessage.getId(), assistantMessage.getId());
         SseEmitter emitter = new SseEmitter(aiChatProperties.getStreamTimeoutMs());
+        emitter.onTimeout(() -> aiTraceService.cancelTrace(
+                traceContext, "SSE_STREAM", new IllegalStateException("SSE stream timed out")));
+        emitter.onError(error -> aiTraceService.cancelTrace(traceContext, "SSE_STREAM", error));
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronizationAdapter() {
             @Override
             public void afterCommit() {
-                aiChatExecutor.execute(() -> generateAndStream(
-                        conversationId,
-                        userId,
-                        assistantMessage.getId(),
-                        conversation,
-                        userMessage.getId(),
-                        content,
-                        request == null ? null : request.getX(),
-                        request == null ? null : request.getY(),
-                        emitter
-                ));
+                aiChatExecutor.execute(() -> AiTraceMdc.run(traceContext, () ->
+                        generateAndStream(
+                                traceContext,
+                                conversationId,
+                                userId,
+                                assistantMessage.getId(),
+                                conversation,
+                                userMessage.getId(),
+                                content,
+                                request == null ? null : request.getX(),
+                                request == null ? null : request.getY(),
+                                emitter
+                        )));
             }
         });
         return emitter;
     }
 
-    private void generateAndStream(Long conversationId,
+    private void generateAndStream(AiTraceContext traceContext,
+                                   Long conversationId,
                                    Long userId,
                                    Long assistantMessageId,
                                    AiConversation conversation,
@@ -312,42 +327,92 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
         AtomicLong firstTokenMs = new AtomicLong(-1L);
         long modelStartedAt = System.currentTimeMillis();
         AiPromptBuildResult promptBuildResult = null;
+        AiTraceSpanScope streamSpan = aiTraceService.startSpan(traceContext, "SSE_STREAM");
+        AiTraceContext requestLogContext = traceContext;
+        String failureStage = "CHAT";
         try {
-            emitter.send(SseEmitter.event().name("message_start").data(messageStartData(conversationId, assistantMessageId)));
-            promptBuildResult = buildPrompt(conversation, assistantMessageId,
+            emitter.send(SseEmitter.event().name("message_start")
+                    .data(messageStartData(traceContext, conversationId, assistantMessageId)));
+            failureStage = "QUERY_PREPROCESS";
+            promptBuildResult = buildPrompt(traceContext, conversation, assistantMessageId,
                     currentMessageId, currentQuestion, x, y);
             if (StrUtil.isNotBlank(promptBuildResult.getDirectResponse())) {
-                firstTokenMs.compareAndSet(-1L, System.currentTimeMillis() - modelStartedAt);
+                if (firstTokenMs.compareAndSet(-1L, System.currentTimeMillis() - modelStartedAt)) {
+                    aiTraceService.markFirstToken(traceContext);
+                }
                 response.append(promptBuildResult.getDirectResponse());
                 emitter.send(SseEmitter.event().name("delta")
                         .data(Collections.singletonMap("content", promptBuildResult.getDirectResponse())));
             } else {
-                aiChatModelClient.stream(promptBuildResult.getMessages(), delta -> {
-                    firstTokenMs.compareAndSet(-1L, System.currentTimeMillis() - modelStartedAt);
-                    response.append(delta);
-                    emitter.send(SseEmitter.event().name("delta").data(Collections.singletonMap("content", delta)));
-                });
+                failureStage = "FINAL_MODEL";
+                Map<String, Object> modelAttributes = new LinkedHashMap<>();
+                modelAttributes.put("provider", aiChatProperties.getProvider());
+                modelAttributes.put("model", aiChatProperties.getModel());
+                modelAttributes.put("inputTokens", promptBuildResult.getInputTokens());
+                AiTraceSpanScope modelSpan = aiTraceService.startSpan(traceContext, "FINAL_MODEL", modelAttributes);
+                requestLogContext = modelSpan.getContext();
+                try {
+                    aiChatModelClient.stream(promptBuildResult.getMessages(), delta -> {
+                        if (firstTokenMs.compareAndSet(-1L, System.currentTimeMillis() - modelStartedAt)) {
+                            aiTraceService.markFirstToken(traceContext);
+                        }
+                        response.append(delta);
+                        emitter.send(SseEmitter.event().name("delta")
+                                .data(Collections.singletonMap("content", delta)));
+                    });
+                    Map<String, Object> completedAttributes = new LinkedHashMap<>(modelAttributes);
+                    completedAttributes.put("outputTokens", aiTokenEstimator.estimateText(response.toString()));
+                    modelSpan.success(completedAttributes);
+                } catch (Exception e) {
+                    modelSpan.failure(e);
+                    throw e;
+                }
             }
             int outputTokens = aiTokenEstimator.estimateText(response.toString());
-            updateAssistantMessage(assistantMessageId, response.toString(), AiMessage.STATUS_COMPLETED,
-                    promptBuildResult.getInputTokens(), outputTokens);
-            saveRequestLog(conversationId, userId, assistantMessageId, "chat", promptBuildResult,
+            failureStage = "MESSAGE_PERSIST";
+            AiTraceSpanScope persistSpan = aiTraceService.startSpan(traceContext, "MESSAGE_PERSIST");
+            try {
+                updateAssistantMessage(assistantMessageId, response.toString(), AiMessage.STATUS_COMPLETED,
+                        promptBuildResult.getInputTokens(), outputTokens);
+                persistSpan.success();
+            } catch (RuntimeException e) {
+                persistSpan.failure(e);
+                throw e;
+            }
+            saveRequestLog(requestLogContext, conversationId, userId, assistantMessageId, "chat", promptBuildResult,
                     firstTokenMs.get(), System.currentTimeMillis() - modelStartedAt, outputTokens, 1, null);
-            emitter.send(SseEmitter.event().name("message_end").data(messageEndData(assistantMessageId, "stop")));
+            failureStage = "SSE_STREAM";
+            emitter.send(SseEmitter.event().name("message_end")
+                    .data(messageEndData(traceContext, assistantMessageId, "stop")));
+            streamSpan.success(Collections.<String, Object>singletonMap("event", "message_end"));
+            aiTraceService.completeTrace(traceContext, promptBuildResult.getOutcome());
             emitter.complete();
-            aiChatExecutor.execute(() -> aiConversationMemoryService.summarizeIfNeeded(conversationId, userId));
+            aiChatExecutor.execute(() -> {
+                AiTraceContext summaryTrace = aiTraceService.startLinkedTrace(
+                        "SUMMARY", traceContext.getTraceId(), conversationId, userId, assistantMessageId);
+                AiTraceMdc.run(summaryTrace, () ->
+                        aiConversationMemoryService.summarizeIfNeeded(summaryTrace, conversationId, userId));
+            });
         } catch (Exception e) {
-            log.error("AI chat generation failed, assistantMessageId={}", assistantMessageId, e);
+            streamSpan.failure(e);
+            log.error("AI chat generation failed, assistantMessageId={}, traceId={}",
+                    assistantMessageId, traceContext.getTraceId(), e);
             if (promptBuildResult == null) {
                 promptBuildResult = new AiPromptBuildResult(Collections.<AiPromptMessage>emptyList(), 0L, 0L, 0);
             }
             int outputTokens = aiTokenEstimator.estimateText(response.toString());
-            updateAssistantMessage(assistantMessageId, response.toString(), AiMessage.STATUS_FAILED,
-                    promptBuildResult.getInputTokens(), outputTokens);
-            saveRequestLog(conversationId, userId, assistantMessageId, "chat", promptBuildResult,
-                    firstTokenMs.get(), System.currentTimeMillis() - modelStartedAt, outputTokens, 0, e.getMessage());
             try {
-                emitter.send(SseEmitter.event().name("error").data(new AiError("AI_GENERATION_FAILED", "AI回复生成失败")));
+                updateAssistantMessage(assistantMessageId, response.toString(), AiMessage.STATUS_FAILED,
+                        promptBuildResult.getInputTokens(), outputTokens);
+            } catch (RuntimeException persistError) {
+                log.error("Failed to persist failed AI message, messageId={}", assistantMessageId, persistError);
+            }
+            saveRequestLog(requestLogContext, conversationId, userId, assistantMessageId, "chat", promptBuildResult,
+                    firstTokenMs.get(), System.currentTimeMillis() - modelStartedAt, outputTokens, 0, e.getMessage());
+            aiTraceService.failTrace(traceContext, failureStage, e);
+            try {
+                emitter.send(SseEmitter.event().name("error")
+                        .data(errorData(traceContext, "AI_GENERATION_FAILED", "AI回复生成失败")));
             } catch (Exception ignored) {
                 // The browser can close the stream before the error event is sent.
             }
@@ -355,21 +420,44 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
         }
     }
 
-    private Map<String, Object> messageStartData(Long conversationId, Long messageId) {
+    private Map<String, Object> messageStartData(AiTraceContext traceContext,
+                                                 Long conversationId, Long messageId) {
         Map<String, Object> data = new LinkedHashMap<>();
+        data.put("requestId", traceContext.getRequestId());
+        data.put("traceId", traceContext.getTraceId());
         data.put("conversationId", conversationId);
         data.put("messageId", messageId);
         return data;
     }
 
-    private Map<String, Object> messageEndData(Long messageId, String finishReason) {
+    private Map<String, Object> messageEndData(AiTraceContext traceContext,
+                                               Long messageId, String finishReason) {
         Map<String, Object> data = new LinkedHashMap<>();
+        data.put("requestId", traceContext.getRequestId());
+        data.put("traceId", traceContext.getTraceId());
         data.put("messageId", messageId);
         data.put("finishReason", finishReason);
         return data;
     }
 
+    private Map<String, Object> errorData(AiTraceContext traceContext, String code, String message) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("requestId", traceContext.getRequestId());
+        data.put("traceId", traceContext.getTraceId());
+        data.put("code", code);
+        data.put("message", message);
+        return data;
+    }
+
     private AiPromptBuildResult buildPrompt(AiConversation conversation, Long assistantMessageId,
+                                            Long currentMessageId, String currentQuestion,
+                                            Double x, Double y) {
+        return buildPrompt(null, conversation, assistantMessageId,
+                currentMessageId, currentQuestion, x, y);
+    }
+
+    private AiPromptBuildResult buildPrompt(AiTraceContext traceContext,
+                                            AiConversation conversation, Long assistantMessageId,
                                             Long currentMessageId, String currentQuestion,
                                             Double x, Double y) {
         Long conversationId = conversation.getId();
@@ -386,31 +474,38 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
         );
         List<AiPromptMessage> recentMessages = buildRecentMessageContext(page.getRecords(), currentMessageId);
         long retrievalStartedAt = System.currentTimeMillis();
-        AiRetrievalQueryPlan queryPlan = aiQueryPreprocessor.preprocess(
-                conversationId,
-                userId,
-                assistantMessageId,
-                currentQuestion,
-                conversation.getSummary(),
-                recentMessages
-        );
+        AiRetrievalQueryPlan queryPlan = traceContext == null
+                ? aiQueryPreprocessor.preprocess(
+                        conversationId, userId, assistantMessageId, currentQuestion,
+                        conversation.getSummary(), recentMessages)
+                : aiQueryPreprocessor.preprocess(
+                        traceContext, conversationId, userId, assistantMessageId, currentQuestion,
+                        conversation.getSummary(), recentMessages);
         if (queryPlan.requiresClarification()) {
             return new AiPromptBuildResult(
                     Collections.<AiPromptMessage>emptyList(),
                     System.currentTimeMillis() - retrievalStartedAt,
                     0L,
                     0,
-                    queryPlan.getClarification()
+                    queryPlan.getClarification(),
+                    "CLARIFIED"
             );
         }
-        List<ShopKnowledge> retrievedShops =
-                shopKnowledgeService.searchRelevantShops(queryPlan.getQueries());
+        List<ShopKnowledge> retrievedShops = traceContext == null
+                ? shopKnowledgeService.searchRelevantShops(queryPlan.getQueries())
+                : shopKnowledgeService.searchRelevantShops(traceContext, queryPlan.getQueries());
         long retrievalMs = System.currentTimeMillis() - retrievalStartedAt;
         long toolStartedAt = System.currentTimeMillis();
         boolean businessEvidenceRequired = requiresBusinessEvidence(currentQuestion);
-        List<AiToolExecution> toolExecutions = businessEvidenceRequired && retrievedShops.isEmpty()
-                ? Collections.emptyList()
-                : aiAgentRunner.run(conversationId, userId, currentQuestion, x, y, retrievedShops);
+        List<AiToolExecution> toolExecutions;
+        if (businessEvidenceRequired && retrievedShops.isEmpty()) {
+            toolExecutions = Collections.emptyList();
+        } else {
+            toolExecutions = traceContext == null
+                    ? aiAgentRunner.run(conversationId, userId, currentQuestion, x, y, retrievedShops)
+                    : aiAgentRunner.run(traceContext, conversationId, userId,
+                            currentQuestion, x, y, retrievedShops);
+        }
         long toolMs = System.currentTimeMillis() - toolStartedAt;
         List<AiPromptMessage> promptMessages = new ArrayList<>(recentMessages.size() + 6);
         promptMessages.add(new AiPromptMessage("system", aiChatProperties.getSystemPrompt()));
@@ -438,7 +533,9 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
                 ? buildNoEvidenceResponse()
                 : null;
         int inputTokens = directResponse == null ? aiTokenEstimator.estimateMessages(promptMessages) : 0;
-        return new AiPromptBuildResult(promptMessages, retrievalMs, toolMs, inputTokens, directResponse);
+        return new AiPromptBuildResult(
+                promptMessages, retrievalMs, toolMs, inputTokens, directResponse,
+                directResponse == null ? "ANSWERED" : "NO_EVIDENCE");
     }
 
     private boolean requiresBusinessEvidence(String question) {
@@ -540,10 +637,12 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
                 .update();
         if (!updated) {
             log.error("Failed to update AI assistant message, messageId={}", messageId);
+            throw new IllegalStateException("Failed to update AI assistant message");
         }
     }
 
-    private void saveRequestLog(Long conversationId, Long userId, Long assistantMessageId, String requestType,
+    private void saveRequestLog(AiTraceContext traceContext,
+                                Long conversationId, Long userId, Long assistantMessageId, String requestType,
                                 AiPromptBuildResult promptBuildResult, long firstTokenMs, long totalMs,
                                 int outputTokens, int success, String errorMessage) {
         try {
@@ -551,6 +650,12 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
             requestLog.setConversationId(conversationId);
             requestLog.setUserId(userId);
             requestLog.setAssistantMessageId(assistantMessageId);
+            if (traceContext != null && traceContext.isValid()) {
+                requestLog.setRequestId(traceContext.getRequestId());
+                requestLog.setTraceId(traceContext.getTraceId());
+                requestLog.setSpanId(traceContext.getCurrentSpanId());
+                requestLog.setParentSpanId(traceContext.getParentSpanId());
+            }
             requestLog.setRequestType(requestType);
             requestLog.setProvider(aiChatProperties.getProvider());
             requestLog.setModel(aiChatProperties.getModel());

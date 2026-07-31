@@ -1,6 +1,7 @@
 package com.hmdp.service;
 
 import com.hmdp.ai.ShopKnowledge;
+import com.hmdp.ai.AiTraceContext;
 
 import java.util.List;
 
@@ -13,6 +14,8 @@ public interface IShopKnowledgeService {
     List<ShopKnowledge> searchRelevantShops(String question);
 
     List<ShopKnowledge> searchRelevantShops(List<String> questions);
+
+    List<ShopKnowledge> searchRelevantShops(AiTraceContext traceContext, List<String> questions);
 
     /**
      * Used by the local evaluation runner to compare pure vector retrieval with

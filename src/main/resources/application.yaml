@@ -25,6 +25,8 @@ mybatis-plus:
 logging:
   level:
     com.hmdp: debug
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] [requestId=%X{requestId:-} traceId=%X{traceId:-} spanId=%X{spanId:-}] %logger{40} - %msg%n"
 
 # RocketMQ配置
 rocketmq:
@@ -80,3 +82,8 @@ ai:
     rag-cases-path: docs/project-proof/rag-cases.csv
     query-rewrite-cases-path: docs/project-proof/query-rewrite-cases.csv
     query-rewrite-report-path: docs/project-proof/query-rewrite-evaluation.md
+  trace:
+    enabled: true
+    retention-days: 30
+    cleanup-batch-size: 500
+    cleanup-cron: "0 20 3 * * ?"

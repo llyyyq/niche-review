@@ -1329,6 +1329,12 @@ CREATE TABLE `tb_ai_tool_log` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'primary key',
   `conversation_id` bigint unsigned NOT NULL COMMENT 'conversation id',
   `user_id` bigint unsigned NOT NULL COMMENT 'conversation owner',
+  `assistant_message_id` bigint unsigned DEFAULT NULL COMMENT 'assistant message id',
+  `request_id` varchar(32) DEFAULT NULL COMMENT 'HTTP/SSE request correlation id',
+  `trace_id` char(32) DEFAULT NULL COMMENT 'logical AI trace id',
+  `span_id` char(16) DEFAULT NULL COMMENT 'tool-call span id',
+  `parent_span_id` char(16) DEFAULT NULL COMMENT 'parent span id',
+  `tool_call_id` varchar(32) DEFAULT NULL COMMENT 'logical tool invocation id',
   `tool_name` varchar(64) NOT NULL COMMENT 'read-only business tool name',
   `request_content` mediumtext COMMENT 'sanitized tool request summary',
   `result_content` mediumtext COMMENT 'sanitized tool result summary',
@@ -1337,7 +1343,11 @@ CREATE TABLE `tb_ai_tool_log` (
   `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'create time',
   PRIMARY KEY (`id`),
   KEY `idx_ai_tool_log_conversation_id` (`conversation_id`, `id`),
-  KEY `idx_ai_tool_log_user_id` (`user_id`, `create_time`)
+  KEY `idx_ai_tool_log_user_id` (`user_id`, `create_time`),
+  KEY `idx_ai_tool_log_request_id` (`request_id`, `id`),
+  KEY `idx_ai_tool_log_trace_id` (`trace_id`, `id`),
+  KEY `idx_ai_tool_log_assistant_message` (`assistant_message_id`, `id`),
+  KEY `idx_ai_tool_log_tool_call` (`tool_call_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI read-only tool invocation logs';
 
 -- ----------------------------
@@ -1349,6 +1359,10 @@ CREATE TABLE `tb_ai_request_log` (
   `conversation_id` bigint unsigned DEFAULT NULL COMMENT 'conversation id',
   `user_id` bigint unsigned DEFAULT NULL COMMENT 'conversation owner',
   `assistant_message_id` bigint unsigned DEFAULT NULL COMMENT 'generated assistant message id',
+  `request_id` varchar(32) DEFAULT NULL COMMENT 'HTTP/SSE request correlation id',
+  `trace_id` char(32) DEFAULT NULL COMMENT 'logical AI trace id',
+  `span_id` char(16) DEFAULT NULL COMMENT 'model-call span id',
+  `parent_span_id` char(16) DEFAULT NULL COMMENT 'parent span id',
   `request_type` varchar(32) NOT NULL COMMENT 'chat or summary',
   `provider` varchar(64) DEFAULT NULL COMMENT 'AI provider identifier',
   `model` varchar(128) DEFAULT NULL COMMENT 'model identifier',
@@ -1363,8 +1377,68 @@ CREATE TABLE `tb_ai_request_log` (
   `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'create time',
   PRIMARY KEY (`id`),
   KEY `idx_ai_request_log_conversation_id` (`conversation_id`, `id`),
-  KEY `idx_ai_request_log_user_id` (`user_id`, `create_time`)
+  KEY `idx_ai_request_log_user_id` (`user_id`, `create_time`),
+  KEY `idx_ai_request_log_request_id` (`request_id`, `id`),
+  KEY `idx_ai_request_log_trace_id` (`trace_id`, `id`),
+  KEY `idx_ai_request_log_assistant_message` (`assistant_message_id`, `id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI request observability logs';
+
+-- ----------------------------
+-- Table structure for tb_ai_trace
+-- ----------------------------
+DROP TABLE IF EXISTS `tb_ai_trace`;
+CREATE TABLE `tb_ai_trace` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `request_id` varchar(32) NOT NULL,
+  `trace_id` char(32) NOT NULL,
+  `root_span_id` char(16) NOT NULL,
+  `trace_type` varchar(32) NOT NULL,
+  `linked_trace_id` char(32) DEFAULT NULL,
+  `conversation_id` bigint unsigned DEFAULT NULL,
+  `user_id` bigint unsigned DEFAULT NULL,
+  `user_message_id` bigint unsigned DEFAULT NULL,
+  `assistant_message_id` bigint unsigned DEFAULT NULL,
+  `status` varchar(16) NOT NULL,
+  `outcome` varchar(32) DEFAULT NULL,
+  `current_stage` varchar(32) DEFAULT NULL,
+  `error_stage` varchar(32) DEFAULT NULL,
+  `error_message` varchar(512) DEFAULT NULL,
+  `started_at` datetime(3) NOT NULL,
+  `first_token_at` datetime(3) DEFAULT NULL,
+  `completed_at` datetime(3) DEFAULT NULL,
+  `total_ms` bigint unsigned DEFAULT NULL,
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_trace_request_id` (`request_id`),
+  UNIQUE KEY `uk_ai_trace_trace_id` (`trace_id`),
+  KEY `idx_ai_trace_conversation` (`conversation_id`, `id`),
+  KEY `idx_ai_trace_assistant_message` (`assistant_message_id`),
+  KEY `idx_ai_trace_status_started` (`status`, `started_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI request root traces';
+
+-- ----------------------------
+-- Table structure for tb_ai_trace_span
+-- ----------------------------
+DROP TABLE IF EXISTS `tb_ai_trace_span`;
+CREATE TABLE `tb_ai_trace_span` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `trace_id` char(32) NOT NULL,
+  `span_id` char(16) NOT NULL,
+  `parent_span_id` char(16) DEFAULT NULL,
+  `stage_name` varchar(32) NOT NULL,
+  `status` varchar(16) NOT NULL,
+  `attributes_json` varchar(2048) DEFAULT NULL,
+  `error_message` varchar(512) DEFAULT NULL,
+  `started_at` datetime(3) NOT NULL,
+  `completed_at` datetime(3) DEFAULT NULL,
+  `duration_ms` bigint unsigned DEFAULT NULL,
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_trace_span` (`trace_id`, `span_id`),
+  KEY `idx_ai_trace_span_parent` (`trace_id`, `parent_span_id`, `id`),
+  KEY `idx_ai_trace_span_stage` (`stage_name`, `create_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI request trace spans';
 
 -- ----------------------------
 -- Table structure for tb_ai_knowledge_sync_task
