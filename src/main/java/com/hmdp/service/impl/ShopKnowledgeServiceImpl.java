@@ -11,22 +11,18 @@ import com.hmdp.config.AiKnowledgeProperties;
 import com.hmdp.entity.Blog;
 import com.hmdp.entity.Shop;
 import com.hmdp.entity.ShopType;
-import com.hmdp.entity.Voucher;
 import com.hmdp.service.IBlogService;
 import com.hmdp.service.IShopKnowledgeService;
 import com.hmdp.service.IShopService;
 import com.hmdp.service.IShopTypeService;
-import com.hmdp.service.IVoucherService;
 import com.hmdp.service.IAiTraceService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -42,8 +38,7 @@ import java.util.stream.Collectors;
 public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
 
     private static final int EMBEDDING_BATCH_SIZE = 10;
-    private static final int MAX_BLOGS_PER_SHOP = 3;
-    private static final int MAX_BLOG_CONTENT_LENGTH = 240;
+    private static final int MAX_BLOG_CONTENT_LENGTH = 800;
     private static final Pattern BUDGET_PATTERN = Pattern.compile(
             "(?:\\u4eba\\u5747|\\u9884\\u7b97)\\s*"
                     + "(?:\\u4e0d\\u8d85\\u8fc7|\\u4e0d\\u9ad8\\u4e8e|\\u4ee5\\u5185|"
@@ -55,9 +50,6 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
 
     @Resource
     private IShopTypeService shopTypeService;
-
-    @Resource
-    private IVoucherService voucherService;
 
     @Resource
     private IBlogService blogService;
@@ -81,19 +73,29 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
     public int rebuildShopKnowledge() {
         List<Shop> shops = shopService.list();
         Map<Long, String> typeNames = shopTypeNames();
-        Map<Long, List<Voucher>> vouchersByShop = enabledVouchersByShop();
-        Map<Long, List<Blog>> blogsByShop = blogsByShop();
+        Map<Long, Shop> shopsById = shops.stream()
+                .collect(Collectors.toMap(Shop::getId, shop -> shop));
+        List<Blog> blogs = blogService.list().stream()
+                .filter(blog -> blog.getShopId() != null && shopsById.containsKey(blog.getShopId()))
+                .collect(Collectors.toList());
         try {
             qdrantKnowledgeClient.recreateCollection(
                     knowledgeProperties.getShopCollection(),
                     embeddingProperties.getDimension()
             );
+            qdrantKnowledgeClient.recreateCollection(
+                    knowledgeProperties.getBlogCollection(),
+                    embeddingProperties.getDimension()
+            );
             for (int start = 0; start < shops.size(); start += EMBEDDING_BATCH_SIZE) {
                 int end = Math.min(start + EMBEDDING_BATCH_SIZE, shops.size());
-                writeBatch(shops.subList(start, end), typeNames, vouchersByShop, blogsByShop);
+                writeShopProfileBatch(shops.subList(start, end), typeNames);
             }
-            log.info("Shop knowledge rebuild completed, shopCount={}, enabledVoucherCount={}, blogCount={}",
-                    shops.size(), countValues(vouchersByShop), countValues(blogsByShop));
+            for (int start = 0; start < blogs.size(); start += EMBEDDING_BATCH_SIZE) {
+                int end = Math.min(start + EMBEDDING_BATCH_SIZE, blogs.size());
+                writeBlogBatch(blogs.subList(start, end), shopsById, typeNames);
+            }
+            log.info("Shop knowledge rebuild completed, shopCount={}, blogCount={}", shops.size(), blogs.size());
             return shops.size();
         } catch (Exception e) {
             throw new IllegalStateException("Failed to rebuild shop knowledge", e);
@@ -109,15 +111,19 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
             Shop shop = shopService.getById(shopId);
             if (shop == null) {
                 qdrantKnowledgeClient.deletePoint(knowledgeProperties.getShopCollection(), shopId);
+                qdrantKnowledgeClient.deleteByShopId(knowledgeProperties.getBlogCollection(), shopId);
                 log.info("Shop knowledge point deleted, shopId={}", shopId);
                 return;
             }
             qdrantKnowledgeClient.ensureCollection(
                     knowledgeProperties.getShopCollection(), embeddingProperties.getDimension());
+            qdrantKnowledgeClient.ensureCollection(
+                    knowledgeProperties.getBlogCollection(), embeddingProperties.getDimension());
             Map<Long, String> typeNames = shopTypeNames();
-            Map<Long, List<Voucher>> vouchersByShop = enabledVouchersByShop();
-            Map<Long, List<Blog>> blogsByShop = blogsByShop();
-            writeBatch(Collections.singletonList(shop), typeNames, vouchersByShop, blogsByShop);
+            writeShopProfileBatch(Collections.singletonList(shop), typeNames);
+            qdrantKnowledgeClient.deleteByShopId(knowledgeProperties.getBlogCollection(), shopId);
+            List<Blog> blogs = blogService.query().eq("shop_id", shopId).list();
+            writeBlogBatch(blogs, Collections.singletonMap(shopId, shop), typeNames);
             log.info("Shop knowledge point synchronized, shopId={}", shopId);
         } catch (Exception e) {
             throw new IllegalStateException("Failed to synchronize shop knowledge, shopId=" + shopId, e);
@@ -215,28 +221,29 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
     private List<ShopKnowledge> searchSingleQuery(AiTraceContext traceContext,
                                                    String question, List<Float> vector,
                                                    boolean keywordFallbackEnabled) throws Exception {
+        RetrievalContext context = buildRetrievalContext(question);
         AiTraceSpanScope vectorSpan = startSpan(traceContext, "QDRANT_SEARCH");
-        List<QdrantKnowledgeClient.QdrantSearchResult> results;
+        List<ShopKnowledge> vectorShops;
         try {
-            results = qdrantKnowledgeClient.search(
-                    knowledgeProperties.getShopCollection(), vector, knowledgeProperties.getRetrieveLimit());
-            success(vectorSpan, Collections.<String, Object>singletonMap("resultCount", results.size()));
+            int candidateLimit = vectorCandidateLimit();
+            QdrantKnowledgeClient.QdrantFilter filter = toQdrantFilter(context);
+            List<QdrantKnowledgeClient.QdrantSearchResult> profileResults = qdrantKnowledgeClient.search(
+                    knowledgeProperties.getShopCollection(), vector, candidateLimit, filter);
+            List<QdrantKnowledgeClient.QdrantSearchResult> blogResults = searchBlogKnowledge(vector, candidateLimit, filter);
+            vectorShops = mergeVectorCandidates(profileResults, blogResults);
+            Map<String, Object> attributes = new LinkedHashMap<>();
+            attributes.put("profileResultCount", profileResults.size());
+            attributes.put("blogResultCount", blogResults.size());
+            attributes.put("candidateShopCount", vectorShops.size());
+            success(vectorSpan, attributes);
         } catch (Exception e) {
             failure(vectorSpan, e);
             throw e;
         }
-        List<ShopKnowledge> vectorShops = new ArrayList<>(results.size());
-        for (QdrantKnowledgeClient.QdrantSearchResult result : results) {
-            Map<String, Object> payload = result.getPayload();
-            Object content = payload.get("content");
-            vectorShops.add(new ShopKnowledge(result.getId(), content == null ? "" : String.valueOf(content),
-                    result.getScore(), payload));
-        }
         if (!keywordFallbackEnabled) {
-            return vectorShops;
+            return limitKnowledge(vectorShops);
         }
 
-        RetrievalContext context = buildRetrievalContext(question);
         if (context.explicitUnknownShop) {
             log.info("RAG retrieval rejected an unknown explicit shop query, questionLength={}",
                     question.length());
@@ -263,6 +270,63 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
         return isReliableVectorResult(constrainedVectorShops)
                 ? constrainedVectorShops
                 : Collections.emptyList();
+    }
+
+    private List<QdrantKnowledgeClient.QdrantSearchResult> searchBlogKnowledge(List<Float> vector, int limit,
+                                                                                 QdrantKnowledgeClient.QdrantFilter filter) {
+        try {
+            return qdrantKnowledgeClient.search(knowledgeProperties.getBlogCollection(), vector, limit, filter);
+        } catch (Exception e) {
+            // Deploying the code before the first rebuild must not take the stable profile retrieval offline.
+            log.warn("Blog knowledge collection is unavailable; continuing with shop profiles only: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    private List<ShopKnowledge> mergeVectorCandidates(
+            List<QdrantKnowledgeClient.QdrantSearchResult> profileResults,
+            List<QdrantKnowledgeClient.QdrantSearchResult> blogResults) {
+        List<ShopKnowledge> candidates = new ArrayList<>();
+        for (QdrantKnowledgeClient.QdrantSearchResult result : profileResults) {
+            candidates.add(toShopKnowledge(result));
+        }
+        for (QdrantKnowledgeClient.QdrantSearchResult result : blogResults) {
+            candidates.add(toShopKnowledge(result));
+        }
+        candidates.sort((left, right) -> Double.compare(
+                right.getScore() == null ? 0D : right.getScore(),
+                left.getScore() == null ? 0D : left.getScore()));
+        Map<Long, ShopKnowledge> deduplicated = new LinkedHashMap<>();
+        for (ShopKnowledge candidate : candidates) {
+            deduplicated.putIfAbsent(candidate.getShopId(), candidate);
+        }
+        return new ArrayList<>(deduplicated.values());
+    }
+
+    private ShopKnowledge toShopKnowledge(QdrantKnowledgeClient.QdrantSearchResult result) {
+        Map<String, Object> payload = result.getPayload();
+        Object payloadShopId = payload.get("shopId");
+        Long shopId = payloadShopId instanceof Number
+                ? ((Number) payloadShopId).longValue() : result.getId();
+        Object content = payload.get("content");
+        return new ShopKnowledge(shopId, content == null ? "" : String.valueOf(content),
+                result.getScore(), payload);
+    }
+
+    private int vectorCandidateLimit() {
+        Integer configured = knowledgeProperties.getVectorCandidateLimit();
+        int candidateLimit = configured == null ? 10 : configured;
+        int retrieveLimit = knowledgeProperties.getRetrieveLimit() == null ? 3 : knowledgeProperties.getRetrieveLimit();
+        return Math.max(Math.max(1, candidateLimit), retrieveLimit);
+    }
+
+    private QdrantKnowledgeClient.QdrantFilter toQdrantFilter(RetrievalContext context) {
+        return new QdrantKnowledgeClient.QdrantFilter()
+                .requireShopIds(context.matchedShopIds)
+                .excludeShopIds(context.excludedShopIds)
+                .requireTypeIds(context.matchedTypeIds)
+                .requireAreas(context.matchedAreas)
+                .maxAveragePrice(context.maxAveragePrice);
     }
 
     private List<String> validQuestions(List<String> questions) {
@@ -390,8 +454,6 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
 
     private List<ShopKnowledge> keywordFallback(RetrievalContext context) {
         Map<Long, String> typeNames = shopTypeNames();
-        Map<Long, List<Voucher>> vouchersByShop = enabledVouchersByShop();
-        Map<Long, List<Blog>> blogsByShop = blogsByShop();
         List<Shop> shops = new ArrayList<>(context.shops);
         shops.sort((left, right) -> Integer.compare(
                 keywordScore(right, typeNames.get(right.getTypeId()), context),
@@ -405,7 +467,7 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
             if (score <= 0) {
                 continue;
             }
-            String content = toKnowledgeText(shop, typeName, vouchersByShop.get(shop.getId()), blogsByShop.get(shop.getId()));
+            String content = toShopProfileText(shop, typeName);
             Map<String, Object> payload = toPayload(shop, typeName, content);
             payload.put("retrievalSource", "keyword-fallback");
             payload.put("keywordScore", score);
@@ -526,6 +588,7 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
 
     private RetrievalContext buildRetrievalContext(String question) {
         List<Shop> shops = shopService.list();
+        List<ShopType> shopTypes = shopTypeService.list();
         String normalizedQuestion = normalize(question);
         Set<Long> matchedShopIds = new LinkedHashSet<>();
         Set<Long> excludedShopIds = new LinkedHashSet<>();
@@ -545,10 +608,42 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
                 "\u6dae\u9505", "\u9910\u996e", "\u591c\u5bb5", "\u6cd5\u9910");
         boolean ktvIntent = containsAny(normalizedQuestion,
                 "ktv", "\u5531\u6b4c", "\u5531k", "\u6b4c\u5385");
+        Set<Long> matchedTypeIds = matchedTypeIds(normalizedQuestion, shopTypes, foodIntent, ktvIntent);
+        Set<String> matchedAreas = matchedAreas(normalizedQuestion, shops);
         boolean explicitUnknownShop = matchedShopIds.isEmpty()
                 && looksLikeExplicitUnknownShop(normalizedQuestion);
         return new RetrievalContext(shops, normalizedQuestion, matchedShopIds, excludedShopIds,
-                maxAveragePrice, foodIntent, ktvIntent, explicitUnknownShop);
+                matchedTypeIds, matchedAreas, maxAveragePrice, foodIntent, ktvIntent, explicitUnknownShop);
+    }
+
+    private Set<Long> matchedTypeIds(String normalizedQuestion, List<ShopType> shopTypes,
+                                     boolean foodIntent, boolean ktvIntent) {
+        Set<Long> matched = new LinkedHashSet<>();
+        for (ShopType type : shopTypes) {
+            String typeName = normalize(type.getName());
+            if (typeName.length() >= 2 && normalizedQuestion.contains(typeName)) {
+                matched.add(type.getId());
+                continue;
+            }
+            if (ktvIntent && typeName.contains("ktv")) {
+                matched.add(type.getId());
+            } else if (foodIntent && (typeName.contains("\u7f8e\u98df") || typeName.contains("\u9910\u996e"))) {
+                matched.add(type.getId());
+            }
+        }
+        return matched;
+    }
+
+    private Set<String> matchedAreas(String normalizedQuestion, List<Shop> shops) {
+        Set<String> matched = new LinkedHashSet<>();
+        for (Shop shop : shops) {
+            String area = shop.getArea();
+            String normalizedArea = normalize(area);
+            if (normalizedArea.length() >= 2 && normalizedQuestion.contains(normalizedArea)) {
+                matched.add(area);
+            }
+        }
+        return matched;
     }
 
     private boolean isExcludedShop(String normalizedQuestion, String shopName) {
@@ -661,16 +756,21 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
         for (ShopKnowledge shop : second) {
             merged.putIfAbsent(shop.getShopId(), shop);
         }
-        int limit = Math.max(1, knowledgeProperties.getRetrieveLimit());
-        return merged.values().stream().limit(limit).collect(Collectors.toList());
+        return limitKnowledge(new ArrayList<>(merged.values()));
     }
 
-    private void writeBatch(List<Shop> shops, Map<Long, String> typeNames,
-                            Map<Long, List<Voucher>> vouchersByShop, Map<Long, List<Blog>> blogsByShop) throws Exception {
+    private List<ShopKnowledge> limitKnowledge(List<ShopKnowledge> candidates) {
+        if (candidates == null || candidates.isEmpty()) {
+            return Collections.emptyList();
+        }
+        int limit = Math.max(1, knowledgeProperties.getRetrieveLimit());
+        return candidates.stream().limit(limit).collect(Collectors.toList());
+    }
+
+    private void writeShopProfileBatch(List<Shop> shops, Map<Long, String> typeNames) throws Exception {
         List<String> documents = new ArrayList<>(shops.size());
         for (Shop shop : shops) {
-            documents.add(toKnowledgeText(shop, typeNames.get(shop.getTypeId()),
-                    vouchersByShop.get(shop.getId()), blogsByShop.get(shop.getId())));
+            documents.add(toShopProfileText(shop, typeNames.get(shop.getTypeId())));
         }
         List<List<Float>> vectors = embeddingModelClient.embed(documents);
         List<QdrantKnowledgeClient.QdrantPoint> points = new ArrayList<>(shops.size());
@@ -682,6 +782,40 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
         qdrantKnowledgeClient.upsert(knowledgeProperties.getShopCollection(), points);
     }
 
+    private void writeBlogBatch(List<Blog> blogs, Map<Long, Shop> shopsById,
+                                Map<Long, String> typeNames) throws Exception {
+        if (blogs == null || blogs.isEmpty()) {
+            return;
+        }
+        List<Blog> validBlogs = new ArrayList<>();
+        List<String> documents = new ArrayList<>();
+        for (Blog blog : blogs) {
+            Shop shop = shopsById.get(blog.getShopId());
+            if (shop == null || blog.getId() == null) {
+                continue;
+            }
+            validBlogs.add(blog);
+            documents.add(toBlogKnowledgeText(shop, typeNames.get(shop.getTypeId()), blog));
+        }
+        if (validBlogs.isEmpty()) {
+            return;
+        }
+        List<List<Float>> vectors = embeddingModelClient.embed(documents);
+        List<QdrantKnowledgeClient.QdrantPoint> points = new ArrayList<>(validBlogs.size());
+        for (int index = 0; index < validBlogs.size(); index++) {
+            Blog blog = validBlogs.get(index);
+            Shop shop = shopsById.get(blog.getShopId());
+            String typeName = typeNames.get(shop.getTypeId());
+            Map<String, Object> payload = toPayload(shop, typeName, documents.get(index));
+            payload.put("documentType", "public_blog");
+            payload.put("blogId", blog.getId());
+            payload.put("blogTitle", blog.getTitle());
+            payload.put("blogUpdatedAt", blog.getUpdateTime() == null ? null : blog.getUpdateTime().toString());
+            points.add(new QdrantKnowledgeClient.QdrantPoint(blog.getId(), vectors.get(index), payload));
+        }
+        qdrantKnowledgeClient.upsert(knowledgeProperties.getBlogCollection(), points);
+    }
+
     private Map<Long, String> shopTypeNames() {
         Map<Long, String> names = new HashMap<>();
         for (ShopType type : shopTypeService.list()) {
@@ -690,31 +824,7 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
         return names;
     }
 
-    private Map<Long, List<Voucher>> enabledVouchersByShop() {
-        LocalDateTime now = LocalDateTime.now();
-        return voucherService.listEnabledVouchersForKnowledge().stream()
-                .filter(voucher -> voucher.getShopId() != null)
-                .filter(voucher -> isAvailableNow(voucher, now))
-                .collect(Collectors.groupingBy(Voucher::getShopId));
-    }
-
-    private boolean isAvailableNow(Voucher voucher, LocalDateTime now) {
-        if (voucher.getBeginTime() != null && voucher.getBeginTime().isAfter(now)) {
-            return false;
-        }
-        if (voucher.getEndTime() != null && voucher.getEndTime().isBefore(now)) {
-            return false;
-        }
-        return voucher.getStock() == null || voucher.getStock() > 0;
-    }
-
-    private Map<Long, List<Blog>> blogsByShop() {
-        return blogService.list().stream()
-                .filter(blog -> blog.getShopId() != null)
-                .collect(Collectors.groupingBy(Blog::getShopId));
-    }
-
-    private String toKnowledgeText(Shop shop, String typeName, List<Voucher> vouchers, List<Blog> blogs) {
+    private String toShopProfileText(Shop shop, String typeName) {
         StringBuilder text = new StringBuilder();
         appendLine(text, "Store ID", shop.getId());
         appendLine(text, "Store name", shop.getName());
@@ -726,51 +836,20 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
         appendLine(text, "Sales", shop.getSold());
         appendLine(text, "Review count", shop.getComments());
         appendLine(text, "Opening hours", shop.getOpenHours());
-        appendVoucherSection(text, vouchers);
-        appendBlogSection(text, blogs);
         return text.toString();
     }
 
-    private void appendVoucherSection(StringBuilder text, List<Voucher> vouchers) {
-        if (vouchers == null || vouchers.isEmpty()) {
-            return;
-        }
-        text.append("Available vouchers:\n");
-        for (Voucher voucher : vouchers) {
-            text.append("- ").append(voucher.getTitle());
-            if (voucher.getPayValue() != null || voucher.getActualValue() != null) {
-                text.append(" (pay ").append(valueOrUnknown(voucher.getPayValue()))
-                        .append(" CNY, value ").append(valueOrUnknown(voucher.getActualValue())).append(" CNY)");
-            }
-            if (StrUtil.isNotBlank(voucher.getRules())) {
-                text.append(", rules: ").append(voucher.getRules().replaceAll("\\s+", " "));
-            }
-            if (voucher.getEndTime() != null) {
-                text.append(", valid until: ").append(voucher.getEndTime());
-            }
-            text.append('\n');
-        }
-    }
-
-    private void appendBlogSection(StringBuilder text, List<Blog> blogs) {
-        if (blogs == null || blogs.isEmpty()) {
-            return;
-        }
-        text.append("Popular public reviews:\n");
-        blogs.stream()
-                .sorted(Comparator.comparing(Blog::getLiked, Comparator.nullsLast(Comparator.reverseOrder())))
-                .limit(MAX_BLOGS_PER_SHOP)
-                .forEach(blog -> {
-                    text.append("- ");
-                    if (StrUtil.isNotBlank(blog.getTitle())) {
-                        text.append(blog.getTitle()).append(": ");
-                    }
-                    text.append(truncate(blog.getContent(), MAX_BLOG_CONTENT_LENGTH));
-                    if (blog.getLiked() != null) {
-                        text.append(" (likes: ").append(blog.getLiked()).append(')');
-                    }
-                    text.append('\n');
-                });
+    private String toBlogKnowledgeText(Shop shop, String typeName, Blog blog) {
+        StringBuilder text = new StringBuilder();
+        appendLine(text, "Store ID", shop.getId());
+        appendLine(text, "Store name", shop.getName());
+        appendLine(text, "Category", typeName);
+        appendLine(text, "Business area", shop.getArea());
+        appendLine(text, "Average spend", shop.getAvgPrice() == null ? null : shop.getAvgPrice() + " CNY");
+        appendLine(text, "Public blog ID", blog.getId());
+        appendLine(text, "Public blog title", blog.getTitle());
+        appendLine(text, "Public blog content", truncate(blog.getContent(), MAX_BLOG_CONTENT_LENGTH));
+        return text.toString();
     }
 
     private void appendLine(StringBuilder text, String label, Object value) {
@@ -779,24 +858,12 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
         }
     }
 
-    private Object valueOrUnknown(Object value) {
-        return value == null ? "unknown" : value;
-    }
-
     private String truncate(String value, int limit) {
         if (StrUtil.isBlank(value)) {
             return "No text content";
         }
         String normalized = value.replaceAll("\\s+", " ").trim();
         return normalized.length() <= limit ? normalized : normalized.substring(0, limit) + "...";
-    }
-
-    private int countValues(Map<Long, ? extends List<?>> groupedValues) {
-        int count = 0;
-        for (List<?> values : groupedValues.values()) {
-            count += values.size();
-        }
-        return count;
     }
 
     private Map<String, Object> toPayload(Shop shop, String typeName, String content) {
@@ -810,6 +877,7 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
         payload.put("avgPrice", shop.getAvgPrice());
         payload.put("score", shop.getScore());
         payload.put("openHours", shop.getOpenHours());
+        payload.put("documentType", "shop_profile");
         payload.put("content", content);
         return payload;
     }
@@ -820,19 +888,24 @@ public class ShopKnowledgeServiceImpl implements IShopKnowledgeService {
         private final String normalizedQuestion;
         private final Set<Long> matchedShopIds;
         private final Set<Long> excludedShopIds;
+        private final Set<Long> matchedTypeIds;
+        private final Set<String> matchedAreas;
         private final Long maxAveragePrice;
         private final boolean foodIntent;
         private final boolean ktvIntent;
         private final boolean explicitUnknownShop;
 
         private RetrievalContext(List<Shop> shops, String normalizedQuestion, Set<Long> matchedShopIds,
-                                 Set<Long> excludedShopIds, Long maxAveragePrice,
+                                 Set<Long> excludedShopIds, Set<Long> matchedTypeIds,
+                                 Set<String> matchedAreas, Long maxAveragePrice,
                                  boolean foodIntent, boolean ktvIntent,
                                  boolean explicitUnknownShop) {
             this.shops = shops;
             this.normalizedQuestion = normalizedQuestion;
             this.matchedShopIds = matchedShopIds;
             this.excludedShopIds = excludedShopIds;
+            this.matchedTypeIds = matchedTypeIds;
+            this.matchedAreas = matchedAreas;
             this.maxAveragePrice = maxAveragePrice;
             this.foodIntent = foodIntent;
             this.ktvIntent = ktvIntent;

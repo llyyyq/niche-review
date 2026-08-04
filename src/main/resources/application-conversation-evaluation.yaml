@@ -1,0 +1,18 @@
+# Real conversation-level evaluation profile.
+# Start with: --spring.profiles.active=local,conversation-evaluation
+# This profile deliberately does not rebuild the knowledge base. Rebuild first only when
+# business data has changed, then run this profile in a separate application start.
+spring:
+  config:
+    activate:
+      on-profile: conversation-evaluation
+
+ai:
+  knowledge:
+    rebuild-on-start: false
+  evaluation:
+    enabled: false
+    conversation-enabled: true
+    # 1012 is the local demonstration user used by the current project data. Override only
+    # when that user does not exist in a different local database.
+    conversation-user-id: ${AI_EVALUATION_USER_ID:1012}

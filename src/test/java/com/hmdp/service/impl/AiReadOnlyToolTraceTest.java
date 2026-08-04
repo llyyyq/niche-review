@@ -113,4 +113,12 @@ class AiReadOnlyToolTraceTest {
                         && toolLog.getAssistantMessageId().equals(40L)
                         && toolLog.getSuccess().equals(0)));
     }
+
+    @Test
+    void openingHoursSynonymsShouldUseDirectShopDetailRouting() {
+        assertTrue(service.shouldUseDirectToolRouting("\u6d77\u5e95\u635e\u706b\u9505\u8425\u4e1a\u5230\u51e0\u70b9\uff1f", null, null));
+        assertTrue(service.shouldUseDirectToolRouting("\u5f00\u4e50\u8feaKTV\u51e0\u70b9\u5173\u95e8\uff1f", null, null));
+        assertTrue(service.shouldUseDirectToolRouting("INLOVE KTV\u5f00\u5230\u51e0\u70b9\uff1f", null, null));
+        assertTrue(service.shouldUseDirectToolRouting("\u661f\u805a\u4f1aKTV\u4ec0\u4e48\u65f6\u5019\u6253\u70ca\uff1f", null, null));
+    }
 }

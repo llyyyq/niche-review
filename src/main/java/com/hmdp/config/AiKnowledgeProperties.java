@@ -9,7 +9,13 @@ public class AiKnowledgeProperties {
 
     private String shopCollection = "shop_knowledge";
 
+    /** One public-review document per point; kept separate from the stable shop profile. */
+    private String blogCollection = "blog_knowledge";
+
     private Integer retrieveLimit = 3;
+
+    /** Fetch a wider candidate set before applying hard business constraints and returning Top3. */
+    private Integer vectorCandidateLimit = 10;
 
     private Boolean rebuildOnStart = false;
 

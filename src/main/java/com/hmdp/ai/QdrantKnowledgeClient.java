@@ -72,7 +72,7 @@ public class QdrantKnowledgeClient {
             Map<String, Object> rawPoint = new LinkedHashMap<>();
             rawPoint.put("id", point.getId());
             rawPoint.put("vector", point.getVector());
-            rawPoint.put("payload", point.getPayload());
+            rawPoint.put("payload", sanitizeJsonValue(point.getPayload()));
             rawPoints.add(rawPoint);
         }
         Map<String, Object> body = new LinkedHashMap<>();
@@ -89,7 +89,28 @@ public class QdrantKnowledgeClient {
         request("POST", "/collections/" + collectionName + "/points/delete?wait=true", body);
     }
 
+    public void deleteByShopId(String collectionName, Long shopId) throws Exception {
+        if (shopId == null) {
+            return;
+        }
+        Map<String, Object> match = new LinkedHashMap<>();
+        match.put("value", shopId);
+        Map<String, Object> condition = new LinkedHashMap<>();
+        condition.put("key", "shopId");
+        condition.put("match", match);
+        Map<String, Object> filter = new LinkedHashMap<>();
+        filter.put("must", Collections.singletonList(condition));
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("filter", filter);
+        request("POST", "/collections/" + collectionName + "/points/delete?wait=true", body);
+    }
+
     public List<QdrantSearchResult> search(String collectionName, List<Float> vector, int limit) throws Exception {
+        return search(collectionName, vector, limit, null);
+    }
+
+    public List<QdrantSearchResult> search(String collectionName, List<Float> vector, int limit,
+                                            QdrantFilter filter) throws Exception {
         if (vector == null || vector.isEmpty()) {
             return Collections.emptyList();
         }
@@ -97,6 +118,9 @@ public class QdrantKnowledgeClient {
         body.put("query", vector);
         body.put("limit", limit);
         body.put("with_payload", true);
+        if (filter != null && !filter.isEmpty()) {
+            body.put("filter", filter.toRequestBody());
+        }
         JsonNode root = request("POST", "/collections/" + collectionName + "/points/query", body);
         List<QdrantSearchResult> results = new ArrayList<>();
         for (JsonNode point : root.path("result").path("points")) {
@@ -117,8 +141,11 @@ public class QdrantKnowledgeClient {
         if (body != null) {
             connection.setDoOutput(true);
             connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+            byte[] requestBody = objectMapper.writeValueAsBytes(sanitizeJsonValue(body));
+            // Fail locally with a clear error before sending a malformed request to Qdrant.
+            objectMapper.readTree(requestBody);
             try (OutputStream outputStream = connection.getOutputStream()) {
-                outputStream.write(objectMapper.writeValueAsBytes(body));
+                outputStream.write(requestBody);
             }
         }
 
@@ -156,6 +183,56 @@ public class QdrantKnowledgeClient {
             }
             return body.toString();
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object sanitizeJsonValue(Object value) {
+        if (value instanceof String) {
+            return sanitizeUnicode((String) value);
+        }
+        if (value instanceof Map) {
+            Map<Object, Object> sanitized = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+                sanitized.put(entry.getKey(), sanitizeJsonValue(entry.getValue()));
+            }
+            return sanitized;
+        }
+        if (value instanceof Iterable) {
+            List<Object> sanitized = new ArrayList<>();
+            for (Object item : (Iterable<?>) value) {
+                sanitized.add(sanitizeJsonValue(item));
+            }
+            return sanitized;
+        }
+        return value;
+    }
+
+    /**
+     * Java strings can contain an unpaired UTF-16 surrogate. MySQL text can preserve one,
+     * while Qdrant's JSON parser rejects it. Replace only invalid code units at the boundary.
+     */
+    private String sanitizeUnicode(String value) {
+        if (value == null || value.isEmpty()) {
+            return value;
+        }
+        StringBuilder result = new StringBuilder(value.length());
+        for (int index = 0; index < value.length(); index++) {
+            char current = value.charAt(index);
+            if (Character.isHighSurrogate(current)) {
+                if (index + 1 < value.length() && Character.isLowSurrogate(value.charAt(index + 1))) {
+                    result.append(current).append(value.charAt(++index));
+                } else {
+                    result.append('\uFFFD');
+                }
+                continue;
+            }
+            if (Character.isLowSurrogate(current)) {
+                result.append('\uFFFD');
+                continue;
+            }
+            result.append(current);
+        }
+        return result.toString();
     }
 
     public static class QdrantPoint {
@@ -203,6 +280,104 @@ public class QdrantKnowledgeClient {
 
         public Map<String, Object> getPayload() {
             return payload;
+        }
+    }
+
+    /** Payload constraints applied by Qdrant before vector ranking. */
+    public static class QdrantFilter {
+        private final List<Long> shopIds = new ArrayList<>();
+        private final List<Long> excludedShopIds = new ArrayList<>();
+        private final List<Long> typeIds = new ArrayList<>();
+        private final List<String> areas = new ArrayList<>();
+        private Long maxAveragePrice;
+
+        public QdrantFilter requireShopIds(Iterable<Long> values) {
+            addLongs(shopIds, values);
+            return this;
+        }
+
+        public QdrantFilter excludeShopIds(Iterable<Long> values) {
+            addLongs(excludedShopIds, values);
+            return this;
+        }
+
+        public QdrantFilter requireTypeIds(Iterable<Long> values) {
+            addLongs(typeIds, values);
+            return this;
+        }
+
+        public QdrantFilter requireAreas(Iterable<String> values) {
+            if (values != null) {
+                for (String value : values) {
+                    if (StrUtil.isNotBlank(value) && !areas.contains(value)) {
+                        areas.add(value);
+                    }
+                }
+            }
+            return this;
+        }
+
+        public QdrantFilter maxAveragePrice(Long value) {
+            this.maxAveragePrice = value;
+            return this;
+        }
+
+        public boolean isEmpty() {
+            return shopIds.isEmpty() && excludedShopIds.isEmpty() && typeIds.isEmpty()
+                    && areas.isEmpty() && maxAveragePrice == null;
+        }
+
+        private Map<String, Object> toRequestBody() {
+            Map<String, Object> filter = new LinkedHashMap<>();
+            List<Map<String, Object>> must = new ArrayList<>();
+            List<Map<String, Object>> mustNot = new ArrayList<>();
+            addMatchCondition(must, "shopId", shopIds);
+            addMatchCondition(must, "typeId", typeIds);
+            addMatchCondition(must, "area", areas);
+            if (maxAveragePrice != null) {
+                Map<String, Object> range = new LinkedHashMap<>();
+                range.put("lte", maxAveragePrice);
+                Map<String, Object> condition = new LinkedHashMap<>();
+                condition.put("key", "avgPrice");
+                condition.put("range", range);
+                must.add(condition);
+            }
+            addMatchCondition(mustNot, "shopId", excludedShopIds);
+            if (!must.isEmpty()) {
+                filter.put("must", must);
+            }
+            if (!mustNot.isEmpty()) {
+                filter.put("must_not", mustNot);
+            }
+            return filter;
+        }
+
+        private void addLongs(List<Long> target, Iterable<Long> values) {
+            if (values == null) {
+                return;
+            }
+            for (Long value : values) {
+                if (value != null && !target.contains(value)) {
+                    target.add(value);
+                }
+            }
+        }
+
+        private void addMatchCondition(List<Map<String, Object>> conditions, String key,
+                                       List<?> values) {
+            if (values.isEmpty()) {
+                return;
+            }
+            Map<String, Object> match = new LinkedHashMap<>();
+            if (values.size() == 1) {
+                match.put("value", values.get(0));
+            } else {
+                match.put("any", values);
+            }
+            Map<String, Object> condition = new LinkedHashMap<>();
+            condition.put("key", key);
+            condition.put("match", match);
+            conditions.add(condition);
         }
     }
 

@@ -1,0 +1,41 @@
+id,split,scenario,history_json,current_question,expected_mode,expected_model_called,expected_shop_names,required_terms,notes
+HO001,HOLDOUT,pass-through,[],103茶餐厅现在有什么优惠券？,PASS_THROUGH,false,103茶餐厅,103茶餐厅|优惠券,冻结留出题：短明确优惠券查询
+HO002,HOLDOUT,pass-through,[],新白鹿餐厅营业到几点？,PASS_THROUGH,false,新白鹿餐厅,新白鹿餐厅|营业时间,冻结留出题：短明确营业时间查询
+HO003,HOLDOUT,pass-through,[],炉鱼人均多少钱？,PASS_THROUGH,false,炉鱼,炉鱼|人均,冻结留出题：短明确人均查询
+HO004,HOLDOUT,pass-through,[],浅草屋寿司有公开探店笔记吗？,PASS_THROUGH,false,浅草屋寿司,浅草屋寿司|探店笔记,冻结留出题：短明确博客查询
+HO005,HOLDOUT,pass-through,[],开乐迪KTV评分和地址是什么？,PASS_THROUGH,false,开乐迪KTV,开乐迪KTV|评分|地址,冻结留出题：短明确详情查询
+HO006,HOLDOUT,pass-through,[],海底捞火锅几点关门？,PASS_THROUGH,false,海底捞火锅,海底捞火锅|营业时间,冻结留出题：关门同义表达
+HO007,HOLDOUT,pass-through,[],Mamala西餐厅有什么特色？,PASS_THROUGH,false,Mamala西餐厅,Mamala西餐厅,冻结留出题：短明确语义查询
+HO008,HOLDOUT,pass-through,[],星聚会KTV是否有优惠券？,PASS_THROUGH,false,星聚会KTV,星聚会KTV|优惠券,冻结留出题：短明确券查询
+HO009,HOLDOUT,context-reference,"[{""role"":""assistant"",""content"":""我推荐炉鱼，适合多人分享。""}]",那家店开到几点？,REWRITE,false,炉鱼,炉鱼|营业时间,冻结留出题：单店指代
+HO010,HOLDOUT,context-reference,"[{""role"":""assistant"",""content"":""浅草屋寿司评分不错，适合朋友聚餐。""}]",它有什么优惠？,REWRITE,false,浅草屋寿司,浅草屋寿司|优惠券,冻结留出题：单店指代
+HO011,HOLDOUT,context-reference,"[{""role"":""assistant"",""content"":""第一家是103茶餐厅，第二家是新白鹿餐厅，第三家是炉鱼。""}]",第二家的人均和地址分别是什么？,REWRITE,false,新白鹿餐厅,新白鹿餐厅|人均|地址,冻结留出题：序号指代
+HO012,HOLDOUT,context-reference,"[{""role"":""assistant"",""content"":""第一家开乐迪KTV，第二家INLOVE KTV。""}]",第二家几点关门？,REWRITE,false,INLOVE KTV,INLOVE KTV|营业时间,冻结留出题：序号指代
+HO013,HOLDOUT,context-reference,"[{""role"":""assistant"",""content"":""我刚才介绍的是Mamala西餐厅。""}]",那里有公开探店笔记吗？,REWRITE,false,Mamala西餐厅,Mamala西餐厅|探店笔记,冻结留出题：地点代词
+HO014,HOLDOUT,context-reference,"[{""role"":""assistant"",""content"":""第一家是星聚会KTV，第二家是开乐迪KTV。""}]",前一家评分多少？,REWRITE,false,星聚会KTV,星聚会KTV|评分,冻结留出题：前一家指代
+HO015,HOLDOUT,context-reference,"[{""role"":""assistant"",""content"":""第一家是103茶餐厅，第二家是浅草屋寿司。""}]",后一家有没有优惠券？,REWRITE,false,浅草屋寿司,浅草屋寿司|优惠券,冻结留出题：后一家指代
+HO016,HOLDOUT,context-reference,"[{""role"":""assistant"",""content"":""新白鹿餐厅人均较低，适合多人聚餐。""}]",它在哪里，周末营业吗？,REWRITE,false,新白鹿餐厅,新白鹿餐厅|地址|营业时间,冻结留出题：单店多事实指代
+HO017,HOLDOUT,long-noisy,[],"我和三位朋友这周末想在运河上街附近吃饭，前面聊了很多无关的路线和停车问题，也不需要你介绍太远的地方。我们预算希望控制在人均100元以内，优先环境轻松、适合聊天的餐厅；请忽略KTV和健身房，最后只推荐一两家真正满足这些条件的店，并说明人均和推荐理由。",REWRITE,true,新白鹿餐厅,运河上街|人均100元|餐厅,冻结留出题：长噪声单意图
+HO018,HOLDOUT,long-noisy,[],"我不需要泛泛的美食榜单，也不用重复解释什么是本地生活。现在真正需要解决的是：下班后想和同事去唱歌，最好离运河上街不远，营业时间尽量晚一些，预算不要太高。请从已有店铺里找合适的KTV，并明确给出地址、评分和关门时间；餐厅、足道和其他类别都不是这次要找的内容。",REWRITE,true,开乐迪KTV,运河上街|KTV|地址|评分|营业时间,冻结留出题：长噪声单意图
+HO019,HOLDOUT,long-noisy,[],"家里人让我找一家可以多人一起吃、不会太贵的餐厅，我之前还问过电影和出行，这些都和本次问题无关。请只根据现有店铺信息，找人均不超过90元、评分尽量高、适合朋友一起吃饭的餐厅；回答时说明店名、人均和评分，不要把没有证据的优惠活动写进去。",REWRITE,true,炉鱼,人均90元|评分|餐厅,冻结留出题：长噪声单意图
+HO020,HOLDOUT,long-noisy,[],"请不要根据网络常识补全，也不要把别的店的内容混进来。我想确认103茶餐厅目前是否真的还有可用代金券，因为我计划今晚和朋友去吃饭；如果有，请说明券面金额、实付金额和使用规则，如果实时资料显示无效或者查不到，就直接说明没有可靠证据。前面的天气和路线描述都可以忽略。",REWRITE,true,103茶餐厅,103茶餐厅|优惠券|使用规则,冻结留出题：长噪声单意图
+HO021,HOLDOUT,long-noisy,[],"我们正在比较两家寿司店以外的选择，聊天里提到的购物和旅游并不重要。请你只查浅草屋寿司的公开探店笔记，告诉我是否存在、笔记主要描述了哪些体验；不要把其他餐厅的博客当成它的内容，也不要因为没有足够资料就编造菜品或评分。",REWRITE,true,浅草屋寿司,浅草屋寿司|探店笔记,冻结留出题：长噪声单意图
+HO022,HOLDOUT,long-noisy,[],"朋友临时约我唱歌，我不需要十家列表，也不需要旧的促销消息。请在当前资料里确认星聚会KTV的营业时间、地址和是否有可用优惠券；如果优惠券是过期信息，应以实时查询为准并明确说明。请只回答这一家，避免把开乐迪或INLOVE的资料混入。",REWRITE,true,星聚会KTV,星聚会KTV|营业时间|地址|优惠券,冻结留出题：长噪声单意图
+HO023,HOLDOUT,long-noisy,[],"我有点在意用餐预算，但不想根据模糊印象做决定。请针对新白鹿餐厅给出人均、地址和营业时间，并判断是否适合四五个朋友正常聚餐；不需要推荐其他类别，也不要凭空添加优惠券。前面提到的酒店、停车和地铁都不是检索条件。",REWRITE,true,新白鹿餐厅,新白鹿餐厅|人均|地址|营业时间,冻结留出题：长噪声单意图
+HO024,HOLDOUT,long-noisy,[],"这次请只回答炉鱼的实时和公开资料：我想知道它适不适合三个人晚餐，人均是否不超过100元、地址在哪里、有没有公开探店笔记。请将事实和推测分开表达；不要因为问题较长就忽略其中任何一个条件，也不要将其他店铺的博客或优惠券套到炉鱼上。",REWRITE,true,炉鱼,炉鱼|人均100元|地址|探店笔记,冻结留出题：长噪声单意图
+HO025,HOLDOUT,multi-intent,[],"推荐运河上街附近人均100元以内的餐厅，同时查询开乐迪KTV几点关门。",DECOMPOSE,true,新白鹿餐厅|开乐迪KTV,运河上街|人均100元|餐厅|开乐迪KTV|营业时间,冻结留出题：推荐与实时事实
+HO026,HOLDOUT,multi-intent,[],"分别告诉我103茶餐厅有什么优惠券，以及浅草屋寿司有没有公开探店笔记。",DECOMPOSE,true,103茶餐厅|浅草屋寿司,优惠券|探店笔记,冻结留出题：优惠券与博客
+HO027,HOLDOUT,multi-intent,[],"推荐适合朋友聚餐、人均90元以内的餐厅，另外查炉鱼的地址和评分。",DECOMPOSE,true,新白鹿餐厅|炉鱼,人均90元|餐厅|炉鱼|地址|评分,冻结留出题：推荐与详情
+HO028,HOLDOUT,multi-intent,[],"开乐迪KTV和INLOVE KTV分别营业到几点，并告诉我哪一家评分更高。",DECOMPOSE,true,开乐迪KTV|INLOVE KTV,营业时间|评分,冻结留出题：双店事实
+HO029,HOLDOUT,multi-intent,[],"查询星聚会KTV是否有有效优惠券，同时找103茶餐厅的公开探店笔记。",DECOMPOSE,true,星聚会KTV|103茶餐厅,优惠券|探店笔记,冻结留出题：实时券与博客
+HO030,HOLDOUT,multi-intent,[],"推荐适合情侣约会的西餐厅，并顺便查询Mamala西餐厅现在的地址和营业时间。",DECOMPOSE,true,Mamala西餐厅,情侣约会|西餐厅|地址|营业时间,冻结留出题：推荐与详情
+HO031,HOLDOUT,multi-intent,[],"查询新白鹿餐厅人均和地址，同时推荐一家评分高于4分、预算100元以内的餐厅。",DECOMPOSE,true,新白鹿餐厅|炉鱼,人均|地址|评分4分|预算100元,冻结留出题：详情与推荐
+HO032,HOLDOUT,multi-intent,[],"我想看浅草屋寿司的探店笔记，另外也想知道103茶餐厅的代金券怎么使用。",DECOMPOSE,true,浅草屋寿司|103茶餐厅,探店笔记|代金券|使用规则,冻结留出题：博客与券规则
+HO033,HOLDOUT,inherited-constraint,"[{""role"":""assistant"",""content"":""第一家是103茶餐厅，人均80元；第二家是新白鹿餐厅，人均61元。""}]",第二家是否适合四个人聚餐？,REWRITE,false,新白鹿餐厅,新白鹿餐厅|四个人聚餐,冻结留出题：继承序号约束
+HO034,HOLDOUT,inherited-constraint,"[{""role"":""assistant"",""content"":""我建议的KTV是开乐迪KTV，位置在运河上街附近。""}]",那家店几点关门，预算不高的话合适吗？,REWRITE,false,开乐迪KTV,开乐迪KTV|营业时间|预算,冻结留出题：继承单店条件
+HO035,HOLDOUT,inherited-constraint,"[{""role"":""assistant"",""content"":""第一家是星聚会KTV，第二家是INLOVE KTV，两家都适合朋友娱乐。""}]",后一家有有效优惠券吗？,REWRITE,false,INLOVE KTV,INLOVE KTV|优惠券,冻结留出题：继承后一家
+HO036,HOLDOUT,inherited-constraint,"[{""role"":""assistant"",""content"":""我刚介绍的是炉鱼，人均约85元，适合多人分享。""}]",那里有公开探店笔记吗，三个人去是否合适？,REWRITE,false,炉鱼,炉鱼|探店笔记|三个人,冻结留出题：继承单店条件
+HO037,HOLDOUT,ambiguous,"[{""role"":""assistant"",""content"":""103茶餐厅和新白鹿餐厅都适合朋友聚餐。""}]",它有什么优惠？,CLARIFY,false,,,冻结留出题：多店代词歧义
+HO038,HOLDOUT,ambiguous,"[{""role"":""assistant"",""content"":""第一家是开乐迪KTV，第二家是INLOVE KTV。""}]",换一家评分更高的，地址在哪里？,CLARIFY,false,,,冻结留出题：换一家缺少比较基准
+HO039,HOLDOUT,ambiguous,[],那家店现在还营业吗？,CLARIFY,false,,,冻结留出题：无历史指代
+HO040,HOLDOUT,ambiguous,"[{""role"":""assistant"",""content"":""我可以推荐炉鱼、浅草屋寿司和新白鹿餐厅。""}]",另外一家有什么优惠？,CLARIFY,false,,,冻结留出题：多店模糊指代

@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS `tb_ai_tool_log` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'primary key',
-  `conversation_id` bigint unsigned NOT NULL COMMENT 'conversation id',
-  `user_id` bigint unsigned NOT NULL COMMENT 'conversation owner',
+  `conversation_id` bigint unsigned DEFAULT NULL COMMENT 'conversation id; NULL for offline evaluation',
+  `user_id` bigint unsigned DEFAULT NULL COMMENT 'conversation owner; NULL for offline evaluation',
   `tool_name` varchar(64) NOT NULL COMMENT 'read-only business tool name',
   `request_content` mediumtext COMMENT 'sanitized tool request summary',
   `result_content` mediumtext COMMENT 'sanitized tool result summary',

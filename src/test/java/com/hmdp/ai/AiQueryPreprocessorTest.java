@@ -3,7 +3,9 @@ package com.hmdp.ai;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hmdp.config.AiChatProperties;
 import com.hmdp.config.AiQueryRewriteProperties;
+import com.hmdp.entity.Shop;
 import com.hmdp.service.IAiRequestLogService;
+import com.hmdp.service.IShopService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -31,6 +33,9 @@ class AiQueryPreprocessorTest {
     @Mock
     private IAiRequestLogService requestLogService;
 
+    @Mock
+    private IShopService shopService;
+
     private AiQueryPreprocessor preprocessor;
 
     @BeforeEach
@@ -51,6 +56,7 @@ class AiQueryPreprocessorTest {
         ReflectionTestUtils.setField(preprocessor, "chatProperties", new AiChatProperties());
         ReflectionTestUtils.setField(preprocessor, "tokenEstimator", new AiTokenEstimator());
         ReflectionTestUtils.setField(preprocessor, "aiRequestLogService", requestLogService);
+        ReflectionTestUtils.setField(preprocessor, "shopService", shopService);
     }
 
     @Test
@@ -180,6 +186,119 @@ class AiQueryPreprocessorTest {
 
         assertEquals(AiQueryRewriteMode.CLARIFY, result.getMode());
         assertTrue(result.getQueries().isEmpty());
+    }
+
+    @Test
+    void uniqueReferenceShouldResolveWithoutCallingRewriteModel() throws Exception {
+        when(shopService.list()).thenReturn(Collections.singletonList(shop(7L, "\u7089\u9c7c")));
+
+        AiRetrievalQueryPlan result = preprocessor.preprocess(
+                null, null, null,
+                "\u90a3\u5bb6\u5e97\u51e0\u70b9\u5173\u95e8\uff1f",
+                null,
+                Collections.singletonList(new AiPromptMessage("assistant", "\u6211\u63a8\u8350\u7089\u9c7c\uff0c\u9002\u5408\u591a\u4eba\u5206\u4eab\u3002"))
+        );
+
+        assertEquals(AiQueryRewriteMode.REWRITE, result.getMode());
+        assertTrue(result.getQueries().get(0).contains("\u7089\u9c7c"));
+        assertFalse(result.isModelCalled());
+        verify(chatModelClient, never()).complete(any(), any());
+    }
+
+    @Test
+    void explicitShopInCurrentQuestionShouldWinOverPronoun() throws Exception {
+        when(shopService.list()).thenReturn(Collections.singletonList(
+                shop(7L, "\u7089\u9c7c(\u62f1\u5885\u4e07\u8fbe\u5e7f\u573a\u5e97)")));
+
+        AiRetrievalQueryPlan result = preprocessor.preprocess(
+                null, null, null,
+                "\u7089\u9c7c\uff08\u62f1\u5885\u4e07\u8fbe\u5e7f\u573a\u5e97\uff09\u5b83\u5468\u672b\u8425\u4e1a\u5417\uff1f",
+                null,
+                Collections.singletonList(new AiPromptMessage("assistant", "\u63a8\u8350\u4e86\u591a\u5bb6\u5e97\u94fa"))
+        );
+
+        assertEquals(AiQueryRewriteMode.REWRITE, result.getMode());
+        assertTrue(result.getQueries().get(0).contains("\u7089\u9c7c(\u62f1\u5885\u4e07\u8fbe\u5e7f\u573a\u5e97)"));
+        assertFalse(result.isModelCalled());
+    }
+
+    @Test
+    void fullWidthParenthesesInAssistantMessageShouldResolveStoreReference() throws Exception {
+        when(shopService.list()).thenReturn(Collections.singletonList(
+                shop(7L, "\u7089\u9c7c(\u62f1\u5885\u4e07\u8fbe\u5e7f\u573a\u5e97)")));
+
+        AiRetrievalQueryPlan result = preprocessor.preprocess(
+                null, null, null,
+                "\u90a3\u5bb6\u5468\u672b\u8425\u4e1a\u5417\uff1f",
+                null,
+                Collections.singletonList(new AiPromptMessage(
+                        "assistant", "\u7089\u9c7c\uff08\u62f1\u5885\u4e07\u8fbe\u5e7f\u573a\u5e97\uff09\u9002\u5408\u670b\u53cb\u805a\u9910"))
+        );
+
+        assertEquals(AiQueryRewriteMode.REWRITE, result.getMode());
+        assertTrue(result.getQueries().get(0).contains("\u7089\u9c7c(\u62f1\u5885\u4e07\u8fbe\u5e7f\u573a\u5e97)"));
+        assertFalse(result.isModelCalled());
+    }
+
+    @Test
+    void ordinalReferenceShouldUseAssistantPresentationOrder() throws Exception {
+        when(shopService.list()).thenReturn(Arrays.asList(
+                shop(1L, "103\u8336\u9910\u5385"), shop(3L, "\u65b0\u767d\u9e7f\u9910\u5385")
+        ));
+
+        AiRetrievalQueryPlan result = preprocessor.preprocess(
+                null, null, null,
+                "\u7b2c\u4e8c\u5bb6\u7684\u4eba\u5747\u662f\u591a\u5c11\uff1f",
+                null,
+                Collections.singletonList(new AiPromptMessage(
+                        "assistant", "\u7b2c\u4e00\u5bb6\u662f103\u8336\u9910\u5385\uff0c\u7b2c\u4e8c\u5bb6\u662f\u65b0\u767d\u9e7f\u9910\u5385\u3002"))
+        );
+
+        assertEquals(AiQueryRewriteMode.REWRITE, result.getMode());
+        assertTrue(result.getQueries().get(0).contains("\u65b0\u767d\u9e7f\u9910\u5385"));
+        assertFalse(result.isModelCalled());
+    }
+
+    @Test
+    void multiShopPronounShouldClarifyWithoutRetrievalRewriteModel() throws Exception {
+        when(shopService.list()).thenReturn(Arrays.asList(
+                shop(1L, "103\u8336\u9910\u5385"), shop(3L, "\u65b0\u767d\u9e7f\u9910\u5385")
+        ));
+
+        AiRetrievalQueryPlan result = preprocessor.preprocess(
+                null, null, null,
+                "\u5b83\u6709\u4ec0\u4e48\u4f18\u60e0\uff1f",
+                null,
+                Collections.singletonList(new AiPromptMessage(
+                        "assistant", "103\u8336\u9910\u5385\u548c\u65b0\u767d\u9e7f\u9910\u5385\u90fd\u53ef\u4ee5\u8003\u8651\u3002"))
+        );
+
+        assertEquals(AiQueryRewriteMode.CLARIFY, result.getMode());
+        assertTrue(result.getQueries().isEmpty());
+        assertFalse(result.isModelCalled());
+    }
+
+    @Test
+    void invalidRewriteForMultiIntentShouldKeepIndependentSegments() throws Exception {
+        when(chatModelClient.complete(any(), any())).thenReturn("invalid-json");
+
+        AiRetrievalQueryPlan result = preprocessor.preprocess(
+                null, null, null,
+                "\u63a8\u8350\u8fd0\u6cb3\u4e0a\u8857\u4eba\u5747100\u5143\u4ee5\u5185\u7684\u9910\u5385\uff0c\u540c\u65f6\u67e5\u8be2\u5f00\u4e50\u8feaKTV\u51e0\u70b9\u5173\u95e8\u3002",
+                null,
+                Collections.<AiPromptMessage>emptyList()
+        );
+
+        assertEquals(AiQueryRewriteMode.FALLBACK, result.getMode());
+        assertEquals(2, result.getQueries().size());
+        assertTrue(result.getQueries().stream().allMatch(query -> query.length() <= 160));
+    }
+
+    private Shop shop(Long id, String name) {
+        Shop shop = new Shop();
+        shop.setId(id);
+        shop.setName(name);
+        return shop;
     }
 
     private String repeat(String value, int count) {

@@ -3,10 +3,13 @@ package com.hmdp.service.impl;
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.hmdp.ai.AiChatModelClient;
+import com.hmdp.ai.AiCompletionOptions;
 import com.hmdp.ai.AiAgentRunner;
 import com.hmdp.ai.AiPromptMessage;
 import com.hmdp.ai.AiPromptBuildResult;
 import com.hmdp.ai.AiQueryPreprocessor;
+import com.hmdp.ai.AiRagEvaluationRequest;
+import com.hmdp.ai.AiRagEvaluationResult;
 import com.hmdp.ai.AiRetrievalQueryPlan;
 import com.hmdp.ai.AiTokenEstimator;
 import com.hmdp.ai.AiToolExecution;
@@ -29,6 +32,7 @@ import com.hmdp.mapper.AiConversationMapper;
 import com.hmdp.config.AiMemoryProperties;
 import com.hmdp.service.IAiConversationService;
 import com.hmdp.service.IAiConversationMemoryService;
+import com.hmdp.service.IAiRagEvaluationService;
 import com.hmdp.service.IAiMessageService;
 import com.hmdp.service.IAiReadOnlyToolService;
 import com.hmdp.service.IAiRequestLogService;
@@ -58,7 +62,7 @@ import java.util.concurrent.atomic.AtomicLong;
 @Slf4j
 @Service
 public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper, AiConversation>
-        implements IAiConversationService {
+        implements IAiConversationService, IAiRagEvaluationService {
 
     private static final int MAX_TITLE_LENGTH = 128;
     private static final int MAX_MESSAGE_LENGTH = 4000;
@@ -313,6 +317,93 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
         return emitter;
     }
 
+    /**
+     * Offline evidence entry point. It shares production query preprocessing, retrieval,
+     * tool routing and model streaming, but intentionally does not create user messages
+     * or SSE output.
+     */
+    @Override
+    public AiRagEvaluationResult evaluate(AiRagEvaluationRequest request) {
+        if (request == null || StrUtil.isBlank(request.getQuestion())) {
+            throw new IllegalArgumentException("Evaluation question must not be blank");
+        }
+        String question = request.getQuestion().trim();
+        AiTraceContext traceContext = aiTraceService.startLinkedTrace(
+                "RAG_EVALUATION", null, null, null, null);
+        long startedAt = System.currentTimeMillis();
+        AtomicLong firstTokenMs = new AtomicLong(-1L);
+        StringBuilder answer = new StringBuilder();
+        AiPromptBuildResult promptBuildResult = null;
+        AiTraceContext requestLogContext = traceContext;
+        String failureStage = "QUERY_PREPROCESS";
+        try {
+            promptBuildResult = buildEvaluationPrompt(traceContext, question, request.getHistory());
+            if (StrUtil.isNotBlank(promptBuildResult.getDirectResponse())) {
+                firstTokenMs.set(System.currentTimeMillis() - startedAt);
+                aiTraceService.markFirstToken(traceContext);
+                answer.append(promptBuildResult.getDirectResponse());
+            } else {
+                failureStage = "FINAL_MODEL";
+                Map<String, Object> modelAttributes = new LinkedHashMap<>();
+                modelAttributes.put("provider", aiChatProperties.getProvider());
+                modelAttributes.put("model", aiChatProperties.getModel());
+                modelAttributes.put("inputTokens", promptBuildResult.getInputTokens());
+                AiTraceSpanScope modelSpan = aiTraceService.startSpan(traceContext, "FINAL_MODEL", modelAttributes);
+                requestLogContext = modelSpan.getContext();
+                try {
+                    aiChatModelClient.stream(promptBuildResult.getMessages(), delta -> {
+                        if (firstTokenMs.compareAndSet(-1L, System.currentTimeMillis() - startedAt)) {
+                            aiTraceService.markFirstToken(traceContext);
+                        }
+                        answer.append(delta);
+                    });
+                    Map<String, Object> completed = new LinkedHashMap<>(modelAttributes);
+                    completed.put("outputTokens", aiTokenEstimator.estimateText(answer.toString()));
+                    modelSpan.success(completed);
+                } catch (Exception e) {
+                    modelSpan.failure(e);
+                    throw e;
+                }
+            }
+            int outputTokens = aiTokenEstimator.estimateText(answer.toString());
+            long totalMs = System.currentTimeMillis() - startedAt;
+            saveRequestLog(requestLogContext, null, null, null, "rag_answer_evaluation", promptBuildResult,
+                    firstTokenMs.get(), totalMs, outputTokens, 1, null);
+            aiTraceService.completeTrace(traceContext, promptBuildResult.getOutcome());
+            return evaluationResult(traceContext, promptBuildResult, answer.toString(),
+                    firstTokenMs.get(), totalMs, null);
+        } catch (Exception e) {
+            log.error("RAG answer evaluation failed, traceId={}", traceContext.getTraceId(), e);
+            if (promptBuildResult == null) {
+                promptBuildResult = new AiPromptBuildResult(
+                        Collections.<AiPromptMessage>emptyList(), 0L, 0L, 0);
+            }
+            long totalMs = System.currentTimeMillis() - startedAt;
+            saveRequestLog(requestLogContext, null, null, null, "rag_answer_evaluation", promptBuildResult,
+                    firstTokenMs.get(), totalMs, aiTokenEstimator.estimateText(answer.toString()), 0, e.getMessage());
+            aiTraceService.failTrace(traceContext, failureStage, e);
+            return evaluationResult(traceContext, promptBuildResult, answer.toString(),
+                    firstTokenMs.get(), totalMs, limitText(e.getMessage(), 512));
+        }
+    }
+
+    private AiRagEvaluationResult evaluationResult(AiTraceContext traceContext,
+                                                    AiPromptBuildResult promptBuildResult,
+                                                    String answer, long firstTokenMs,
+                                                    long totalMs, String errorMessage) {
+        AiRetrievalQueryPlan plan = promptBuildResult.getQueryPlan();
+        return new AiRagEvaluationResult(
+                traceContext.getRequestId(), traceContext.getTraceId(),
+                plan == null ? "UNKNOWN" : plan.getMode().name(),
+                plan == null ? Collections.<String>emptyList() : plan.getQueries(),
+                plan != null && plan.isModelCalled(),
+                plan != null && plan.isValidModelOutput(),
+                promptBuildResult.getOutcome(),
+                answer, promptBuildResult.getRetrievedShops(), promptBuildResult.getToolExecutions(),
+                promptBuildResult.getRetrievalMs(), promptBuildResult.getToolMs(),
+                firstTokenMs, totalMs, errorMessage);
+    }
+
     private void generateAndStream(AiTraceContext traceContext,
                                    Long conversationId,
                                    Long userId,
@@ -460,12 +551,10 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
                                             AiConversation conversation, Long assistantMessageId,
                                             Long currentMessageId, String currentQuestion,
                                             Double x, Double y) {
-        Long conversationId = conversation.getId();
-        Long userId = conversation.getUserId();
         long pageSize = Math.max(1, aiChatProperties.getContextMessageLimit());
         QueryWrapper<AiMessage> wrapper = new QueryWrapper<AiMessage>()
-                .eq("conversation_id", conversationId)
-                .eq("user_id", userId)
+                .eq("conversation_id", conversation.getId())
+                .eq("user_id", conversation.getUserId())
                 .eq("status", AiMessage.STATUS_COMPLETED)
                 .orderByDesc("id");
         Page<AiMessage> page = aiMessageService.page(
@@ -473,14 +562,29 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
                 wrapper
         );
         List<AiPromptMessage> recentMessages = buildRecentMessageContext(page.getRecords(), currentMessageId);
+        return assemblePrompt(traceContext, conversation.getId(), conversation.getUserId(),
+                conversation.getSummary(), assistantMessageId, recentMessages, currentQuestion, x, y);
+    }
+
+    private AiPromptBuildResult buildEvaluationPrompt(AiTraceContext traceContext, String currentQuestion,
+                                                       List<AiPromptMessage> history) {
+        return assemblePrompt(traceContext, null, null, null, null,
+                history == null ? Collections.<AiPromptMessage>emptyList() : history,
+                currentQuestion, null, null);
+    }
+
+    private AiPromptBuildResult assemblePrompt(AiTraceContext traceContext, Long conversationId,
+                                                Long userId, String summary, Long assistantMessageId,
+                                                List<AiPromptMessage> recentMessages,
+                                                String currentQuestion, Double x, Double y) {
         long retrievalStartedAt = System.currentTimeMillis();
         AiRetrievalQueryPlan queryPlan = traceContext == null
                 ? aiQueryPreprocessor.preprocess(
                         conversationId, userId, assistantMessageId, currentQuestion,
-                        conversation.getSummary(), recentMessages)
+                        summary, recentMessages)
                 : aiQueryPreprocessor.preprocess(
                         traceContext, conversationId, userId, assistantMessageId, currentQuestion,
-                        conversation.getSummary(), recentMessages);
+                        summary, recentMessages);
         if (queryPlan.requiresClarification()) {
             return new AiPromptBuildResult(
                     Collections.<AiPromptMessage>emptyList(),
@@ -488,7 +592,10 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
                     0L,
                     0,
                     queryPlan.getClarification(),
-                    "CLARIFIED"
+                    "CLARIFIED",
+                    queryPlan,
+                    Collections.<ShopKnowledge>emptyList(),
+                    Collections.<AiToolExecution>emptyList()
             );
         }
         List<ShopKnowledge> retrievedShops = traceContext == null
@@ -513,9 +620,9 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
         if (hasValidLocation(x, y)) {
             promptMessages.add(new AiPromptMessage("system", buildClientLocationContext(x, y)));
         }
-        if (StrUtil.isNotBlank(conversation.getSummary())) {
+        if (StrUtil.isNotBlank(summary)) {
             promptMessages.add(new AiPromptMessage("system", "Conversation memory:\n"
-                    + limitText(conversation.getSummary(), aiMemoryProperties.getMaxSummaryChars())));
+                    + limitText(summary, aiMemoryProperties.getMaxSummaryChars())));
         }
         promptMessages.addAll(recentMessages);
         if (!retrievedShops.isEmpty()) {
@@ -535,7 +642,8 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
         int inputTokens = directResponse == null ? aiTokenEstimator.estimateMessages(promptMessages) : 0;
         return new AiPromptBuildResult(
                 promptMessages, retrievalMs, toolMs, inputTokens, directResponse,
-                directResponse == null ? "ANSWERED" : "NO_EVIDENCE");
+                directResponse == null ? "ANSWERED" : "NO_EVIDENCE",
+                queryPlan, retrievedShops, toolExecutions);
     }
 
     private boolean requiresBusinessEvidence(String question) {
@@ -571,8 +679,13 @@ public class AiConversationServiceImpl extends ServiceImpl<AiConversationMapper,
         return "Respond in the user's language. You are a practical local-life assistant. "
                 + "When recommending stores, provide at most three numbered choices. "
                 + "For each choice, show the store name and only the relevant known facts such as category, rating, average spend, address, opening hours, vouchers, or public-review highlights. "
+                + "Evidence priority is: live business-tool result first, then retrieved knowledge. "
+                + "Voucher availability, price, stock, validity, latest public blogs, distance, and current opening status "
+                + "must be stated only when the live result explicitly supports the same store. "
+                + "Never combine voucher values, calculate a discount plan, or move a fact from one store to another. "
                 + "Do not expose retrieval scores, internal document labels, database field names, or raw knowledge text. "
                 + "Do not invent stores, discounts, exact distances, availability, or facts missing from the supplied context. "
+                + "When evidence covers only part of a multi-part question, answer the supported part and explicitly say which part is unavailable. "
                 + "If the supplied information is insufficient, state that clearly and suggest a narrower query.";
     }
 

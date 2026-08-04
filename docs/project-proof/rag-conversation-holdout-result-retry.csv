@@ -1,0 +1,4 @@
+case_id,scenario,conversation_id,user_message_id,assistant_message_id,request_id,trace_id,trace_status,outcome,error_stage,message_status,question,expected_shop_names,required_tools,actual_tools,required_tools_invoked,expected_entity_mentioned,execution_completed,automatic_pass,retrieval_ms,tool_ms,first_token_ms,total_ms,input_tokens,output_tokens,error,tool_evidence,manual_status,review_faithfulness,review_constraints,review_coverage,review_realtime_consistency,review_no_evidence_safety,review_failure_stage,review_notes,final_answer
+CE009,context-reference,116,401,402,cbb19fc19fbf0778cd3f9c7a2252680c,4eec7a5dbf15cb543de90af0e9371de4,SUCCEEDED,ANSWERED,,1,它开到几点？,炉鱼,shopDetail,shopDetail,true,true,true,true,423,53,2823,3254,848,45,,"shopDetail: Live store details:
+- name=炉鱼(拱墅万达广场店), rating=4.7/5, averageSpend=85 CNY, address=杭行路666号万达商业中心4幢2单元409室(铺位号4005), openingHours=00:00-24:00
+",PENDING,,,,,,,,炉鱼(拱墅万达广场店)营业时间为 **00:00-24:00**，也就是全天营业，不打烊。

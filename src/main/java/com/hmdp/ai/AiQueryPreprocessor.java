@@ -6,8 +6,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hmdp.config.AiChatProperties;
 import com.hmdp.config.AiQueryRewriteProperties;
 import com.hmdp.entity.AiRequestLog;
+import com.hmdp.entity.Shop;
 import com.hmdp.service.IAiRequestLogService;
 import com.hmdp.service.IAiTraceService;
+import com.hmdp.service.IShopService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -41,7 +43,11 @@ public class AiQueryPreprocessor {
 
     private static final List<String> CONNECTORS = Arrays.asList(
             "\u540c\u65f6", "\u53e6\u5916", "\u5e76\u4e14", "\u4ee5\u53ca",
-            "\u8fd8\u8981", "\u5206\u522b", "\u987a\u4fbf", "\u800c\u4e14"
+            "\u8fd8\u8981", "\u5206\u522b", "\u987a\u4fbf", "\u800c\u4e14", "\u540c\u65f6\u67e5\u8be2"
+    );
+
+    private static final List<String> CHANGE_REFERENCE_MARKERS = Arrays.asList(
+            "\u6362\u4e00\u5bb6", "\u518d\u4fbf\u5b9c", "\u518d\u8fd1\u4e00\u70b9"
     );
 
     private static final List<List<String>> INTENT_GROUPS = Arrays.asList(
@@ -80,6 +86,9 @@ public class AiQueryPreprocessor {
 
     @Resource
     private IAiTraceService aiTraceService;
+
+    @Resource
+    private IShopService shopService;
 
     public AiRetrievalQueryPlan preprocess(Long conversationId, Long userId, Long assistantMessageId,
                                            String question, String summary,
@@ -135,10 +144,18 @@ public class AiQueryPreprocessor {
         if (!trigger.required) {
             return passThrough(original);
         }
-        if (trigger.contextReference && (recentMessages == null || recentMessages.isEmpty())
-                && StrUtil.isBlank(summary)) {
-            return plan(AiQueryRewriteMode.CLARIFY, Collections.<String>emptyList(),
-                    CLARIFICATION_MESSAGE, false, true, 0L, original.length());
+        if (trigger.contextReference) {
+            ReferenceResolution resolution = resolveReference(original, recentMessages);
+            if (resolution.isResolved()) {
+                return plan(AiQueryRewriteMode.REWRITE,
+                        Collections.singletonList(standaloneReferenceQuery(resolution.getShopName(), original)),
+                        null, false, true, 0L, original.length());
+            }
+            if (resolution.isAmbiguous()
+                    || ((recentMessages == null || recentMessages.isEmpty()) && StrUtil.isBlank(summary))) {
+                return plan(AiQueryRewriteMode.CLARIFY, Collections.<String>emptyList(),
+                        CLARIFICATION_MESSAGE, false, true, 0L, original.length());
+            }
         }
 
         List<AiPromptMessage> modelMessages = buildRewritePrompt(original, summary, recentMessages);
@@ -331,7 +348,7 @@ public class AiQueryPreprocessor {
     }
 
     private List<String> deterministicCompression(String original, int limit) {
-        String[] parts = original.split("(?<=[\\u3002\\uff01\\uff1f!?;\\uff1b\\n])");
+        String[] parts = splitFallbackSegments(original, limit);
         List<SentenceCandidate> candidates = new ArrayList<>();
         for (int i = 0; i < parts.length; i++) {
             String sentence = normalizeWhitespace(parts[i]);
@@ -370,6 +387,150 @@ public class AiQueryPreprocessor {
             queries.add(sanitizeQuery(original));
         }
         return queries;
+    }
+
+    private String[] splitFallbackSegments(String original, int limit) {
+        String normalized = normalizeWhitespace(original);
+        if (limit <= 1) {
+            return normalized.split("(?<=[\\u3002\\uff01\\uff1f!?;\\uff1b\\n])");
+        }
+        String connectorPattern = "\\s*(?:\\u540c\\u65f6|\\u53e6\\u5916|\\u5e76\\u4e14|\\u5206\\u522b|\\u987a\\u4fbf|\\u800c\\u4e14|\\u8fd8\\u8981)\\s*";
+        String[] segments = normalized.split(connectorPattern);
+        if (segments.length > 1) {
+            return segments;
+        }
+        return normalized.split("(?<=[\\u3002\\uff01\\uff1f!?;\\uff1b\\n])");
+    }
+
+    private ReferenceResolution resolveReference(String question,
+                                                 List<AiPromptMessage> recentMessages) {
+        List<Shop> shops;
+        try {
+            shops = shopService == null ? Collections.<Shop>emptyList() : shopService.list();
+        } catch (Exception e) {
+            log.warn("Failed to load shop names while resolving a contextual reference", e);
+            return ReferenceResolution.unknown();
+        }
+        if (shops == null || shops.isEmpty()) {
+            return ReferenceResolution.unknown();
+        }
+
+        // A concrete store name in the current question is stronger evidence than a pronoun.
+        List<String> currentQuestionCandidates = shopNamesInText(question, shops);
+        if (currentQuestionCandidates.size() == 1) {
+            return ReferenceResolution.resolved(currentQuestionCandidates.get(0));
+        }
+        if (currentQuestionCandidates.size() > 1 || containsAny(question, CHANGE_REFERENCE_MARKERS)) {
+            return ReferenceResolution.ambiguous();
+        }
+        if (recentMessages == null || recentMessages.isEmpty()) {
+            return ReferenceResolution.unknown();
+        }
+
+        List<String> latestAssistantCandidates = Collections.emptyList();
+        LinkedHashSet<String> allAssistantCandidates = new LinkedHashSet<>();
+        for (int index = recentMessages.size() - 1; index >= 0; index--) {
+            AiPromptMessage message = recentMessages.get(index);
+            if (!"assistant".equalsIgnoreCase(message.getRole())) {
+                continue;
+            }
+            List<String> candidates = shopNamesInText(message.getContent(), shops);
+            if (latestAssistantCandidates.isEmpty() && !candidates.isEmpty()) {
+                latestAssistantCandidates = candidates;
+            }
+            allAssistantCandidates.addAll(candidates);
+        }
+
+        int ordinal = referenceOrdinal(question);
+        if (ordinal > 0) {
+            if (latestAssistantCandidates.size() >= ordinal) {
+                return ReferenceResolution.resolved(latestAssistantCandidates.get(ordinal - 1));
+            }
+            return latestAssistantCandidates.isEmpty()
+                    ? ReferenceResolution.unknown() : ReferenceResolution.ambiguous();
+        }
+        if (containsAny(question, Arrays.asList("\u524d\u4e00\u5bb6", "\u540e\u4e00\u5bb6"))) {
+            if (latestAssistantCandidates.size() < 2) {
+                return latestAssistantCandidates.isEmpty()
+                        ? ReferenceResolution.unknown() : ReferenceResolution.ambiguous();
+            }
+            return containsAny(question, Collections.singletonList("\u524d\u4e00\u5bb6"))
+                    ? ReferenceResolution.resolved(latestAssistantCandidates.get(0))
+                    : ReferenceResolution.resolved(latestAssistantCandidates.get(latestAssistantCandidates.size() - 1));
+        }
+        if (allAssistantCandidates.size() == 1) {
+            return ReferenceResolution.resolved(allAssistantCandidates.iterator().next());
+        }
+        return allAssistantCandidates.isEmpty()
+                ? ReferenceResolution.unknown() : ReferenceResolution.ambiguous();
+    }
+
+    private List<String> shopNamesInText(String text, List<Shop> shops) {
+        if (StrUtil.isBlank(text)) {
+            return Collections.emptyList();
+        }
+        String normalizedText = normalizeForStoreMatch(text);
+        List<Shop> ordered = new ArrayList<>(shops);
+        ordered.sort(Comparator.comparingInt((Shop shop) -> shop.getName() == null ? 0 : shop.getName().length())
+                .reversed());
+        Map<Integer, String> matches = new LinkedHashMap<>();
+        for (Shop shop : ordered) {
+            String shopName = shop.getName();
+            if (StrUtil.isBlank(shopName)) {
+                continue;
+            }
+            for (String alias : shopAliases(shopName)) {
+                int position = normalizedText.indexOf(alias);
+                if (position >= 0 && !matches.containsKey(position)) {
+                    matches.put(position, shopName);
+                }
+            }
+        }
+        return matches.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .map(Map.Entry::getValue)
+                .collect(java.util.stream.Collectors.toList());
+    }
+
+    private List<String> shopAliases(String shopName) {
+        LinkedHashSet<String> aliases = new LinkedHashSet<>();
+        String normalized = normalizeForStoreMatch(shopName);
+        if (StrUtil.isNotBlank(normalized)) {
+            aliases.add(normalized);
+        }
+        int branchStart = normalized.indexOf('(');
+        if (branchStart > 1) {
+            aliases.add(normalized.substring(0, branchStart));
+        }
+        return new ArrayList<>(aliases);
+    }
+
+    private String normalizeForStoreMatch(String value) {
+        if (value == null) {
+            return "";
+        }
+        return normalizeWhitespace(value)
+                .replace('\uFF08', '(')
+                .replace('\uFF09', ')')
+                .replaceAll("\\s+", "")
+                .toLowerCase();
+    }
+
+    private int referenceOrdinal(String question) {
+        if (question.contains("\u7b2c\u4e00\u5bb6")) {
+            return 1;
+        }
+        if (question.contains("\u7b2c\u4e8c\u5bb6")) {
+            return 2;
+        }
+        if (question.contains("\u7b2c\u4e09\u5bb6")) {
+            return 3;
+        }
+        return 0;
+    }
+
+    private String standaloneReferenceQuery(String shopName, String original) {
+        return sanitizeQuery(shopName + " " + original);
     }
 
     private String sanitizeQuery(String value) {
@@ -490,6 +651,40 @@ public class AiQueryPreprocessor {
 
         private int getScore() {
             return score;
+        }
+    }
+
+    private static class ReferenceResolution {
+        private final String shopName;
+        private final boolean ambiguous;
+
+        private ReferenceResolution(String shopName, boolean ambiguous) {
+            this.shopName = shopName;
+            this.ambiguous = ambiguous;
+        }
+
+        private static ReferenceResolution resolved(String shopName) {
+            return new ReferenceResolution(shopName, false);
+        }
+
+        private static ReferenceResolution ambiguous() {
+            return new ReferenceResolution(null, true);
+        }
+
+        private static ReferenceResolution unknown() {
+            return new ReferenceResolution(null, false);
+        }
+
+        private boolean isResolved() {
+            return StrUtil.isNotBlank(shopName);
+        }
+
+        private boolean isAmbiguous() {
+            return ambiguous;
+        }
+
+        private String getShopName() {
+            return shopName;
         }
     }
 }

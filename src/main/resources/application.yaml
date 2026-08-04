@@ -24,7 +24,11 @@ mybatis-plus:
   type-aliases-package: com.hmdp.entity # 别名扫描包
 logging:
   level:
-    com.hmdp: debug
+    # 默认保留业务 INFO/WARN/ERROR，避免定时任务的 MyBatis DEBUG SQL 淹没异常
+    com.hmdp: info
+    com.hmdp.mapper: warn
+    org.springframework.context.support.PostProcessorRegistrationDelegate: warn
+    org.apache.rocketmq.spring: warn
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] [requestId=%X{requestId:-} traceId=%X{traceId:-} spanId=%X{spanId:-}] %logger{40} - %msg%n"
 
@@ -54,7 +58,9 @@ ai:
     read-timeout-ms: 8000
   knowledge:
     shop-collection: shop_knowledge
+    blog-collection: blog_knowledge
     retrieve-limit: 3
+    vector-candidate-limit: 10
     rebuild-on-start: false
     incremental-sync-enabled: true
     sync-retry-max-attempts: 5
@@ -82,6 +88,21 @@ ai:
     rag-cases-path: docs/project-proof/rag-cases.csv
     query-rewrite-cases-path: docs/project-proof/query-rewrite-cases.csv
     query-rewrite-report-path: docs/project-proof/query-rewrite-evaluation.md
+    rag-answer-source-path: docs/project-proof/query-rewrite-cases.csv
+    rag-answer-source-split: TEST
+    rag-answer-expected-case-count: 40
+    rag-answer-cases-path: docs/project-proof/rag-answer-regression.csv
+    rag-answer-report-path: docs/project-proof/rag-answer-regression.md
+    # Disabled by default: every fixture is executed through the real chat service and model.
+    conversation-enabled: false
+    conversation-user-id:
+    conversation-cases-path: docs/project-proof/rag-conversation-holdout.csv
+    conversation-cases-split: HOLDOUT
+    conversation-expected-case-count: 40
+    conversation-output-path: docs/project-proof/rag-conversation-holdout-result.csv
+    conversation-report-path: docs/project-proof/rag-conversation-holdout-report.md
+    conversation-title-prefix: "[E2E-EVAL]"
+    conversation-turn-timeout-ms: 150000
   trace:
     enabled: true
     retention-days: 30

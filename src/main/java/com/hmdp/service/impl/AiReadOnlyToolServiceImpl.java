@@ -350,7 +350,10 @@ public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
 
     private boolean containsShopDetailIntent(String question) {
         return containsAny(question, "shop detail", "opening hours", "address", "average spend", "rating",
-                "\u5e97\u94fa\u8be6\u60c5", "\u8425\u4e1a\u65f6\u95f4", "\u5730\u5740", "\u4eba\u5747", "\u8bc4\u5206");
+                "\u5e97\u94fa\u8be6\u60c5", "\u8425\u4e1a\u65f6\u95f4", "\u8425\u4e1a\u5230",
+                "\u51e0\u70b9\u5173\u95e8", "\u4ec0\u4e48\u65f6\u5019\u5173\u95e8", "\u5f00\u5230\u51e0\u70b9",
+                "\u6253\u70ca", "\u5468\u672b\u8425\u4e1a", "\u5468\u672b\u5f00\u95e8", "\u4eca\u5929\u8425\u4e1a",
+                "\u662f\u5426\u8425\u4e1a", "\u8425\u4e1a\u5417", "\u5f00\u7740\u5417", "\u5730\u5740", "\u4eba\u5747", "\u8bc4\u5206");
     }
 
     private boolean containsAny(String value, String... keywords) {

@@ -1,275 +1,37 @@
 # Niche Review
 
-Niche Review 是一个面向本地生活场景的 Java 后端项目，提供店铺查询、优惠券秒杀、社交点评和 AI 导购能力。
+面向本地生活场景的 Java 后端项目，覆盖店铺查询、优惠券秒杀、社交点评和 AI 导购。
 
-项目重点解决三类实际问题：高并发查询下的 Redis 缓存治理、异步下单与支付超时的最终一致性，以及基于真实业务数据的 RAG 检索与流式 AI 对话。
-
-<a id="overview"></a>
+<a id="nav"></a>
 
 ## 导航
 
-| 章节 | 说明 |
-| --- | --- |
-| [核心能力](#highlights) | 项目解决的问题与关键实现 |
-| [基础后端设计](#backend-foundation) | 登录、店铺发现、社交互动与签到的业务底座 |
-| [总体架构](#architecture) | 缓存、交易、AI 导购和同步链路 |
-| [验证与恢复](#verification) | 自动化测试、压测、RAG 评测和故障恢复记录 |
-| [快速开始](#quick-start) | 本地依赖、配置与启动方式 |
-| [接口与代码索引](#code-map) | 常用接口和核心实现入口 |
-
-<a id="highlights"></a>
-
-## 核心能力
-
-- **店铺缓存治理**：结合 Redisson BloomFilter、空值缓存、随机 TTL 和带过期时间的 SETNX 互斥锁，处理缓存穿透、击穿和雪崩；锁使用唯一持有者标识和 Lua 比较删除，店铺更新在事务提交后删除缓存。
-- **可靠异步秒杀**：Lua 原子完成库存预扣和一人一单校验，RocketMQ 异步创建订单；订单 ID 幂等、用户-优惠券联合唯一索引、消费重试和 DLQ 补偿共同处理重复消费及最终失败。
-- **可靠超时关单**：订单和超时任务在同一事务落库，定时投递器以版本号 CAS 抢占任务并指数退避；支付回调与延迟关单共用订单级 Redisson 锁，避免状态反转和库存重复归还。
-- **混合 RAG 检索**：店铺画像、有效优惠券和公开探店笔记写入 Qdrant；对指代、长输入和多意图问题按需重写或拆分，再融合向量召回、关键词 fallback 与类别、商圈、预算约束。
-- **增量知识同步**：业务变更后创建持久化同步任务，使用 CAS、指数退避和超时恢复更新 Qdrant，避免已落库任务因短暂外部服务故障长期丢失。
-- **可观测 AI 导购**：每个聊天请求生成独立的 `requestId`、`traceId` 和 Span；检索、工具、模型、SSE 与消息持久化可通过同一 Trace 精确关联。
-
-## 业务范围
-
-| 领域 | 功能 |
-| --- | --- |
-| 用户 | 手机验证码登录、Token 刷新、登出、登录拦截和用户上下文 |
-| 店铺 | 分类查询、详情缓存、关键词查询、Redis GEO 附近店铺 |
-| 社交 | 博客发布、点赞、关注、共同关注和 Feed 流滚动分页 |
-| 秒杀 | Redis 预扣、异步下单、失败补偿、超时关单和模拟支付 |
-| AI 导购 | 多轮会话、RAG 混合检索、只读业务工具、SSE 流式输出 |
-
-<a id="backend-foundation"></a>
-
-## 基础后端设计
-
-项目先实现本地生活点评的核心业务，再在真实店铺、优惠券和博客数据之上扩展高并发交易与 AI 导购。
-
-| 业务链路 | 设计 | 关键数据结构 |
-| --- | --- | --- |
-| 登录与鉴权 | 验证码登录后将用户 DTO 写入 Redis Hash；拦截器按 Token 恢复 `UserHolder`，登出时删除 Token | `login:token:{token}` Hash、ThreadLocal |
-| 店铺发现 | 分类列表优先从缓存读取；按分类和坐标查询时使用 Redis GEO 先得到店铺 ID 与距离，再按原顺序回表查询详情 | `shop:geo:{typeId}` GEO、`ORDER BY FIELD` |
-| 博客互动 | 点赞集合与数据库点赞数双写；查询时回填作者与当前用户点赞状态 | `blog:liked:{blogId}` Set |
-| 关注与 Feed 流 | 关注关系落 MySQL；博主发帖时将博客 ID 投递给粉丝收件箱，按时间戳分页读取 | `feed:{userId}` ZSet、滚动分页 `minTime + offset` |
-| 签到与 UV | 月度签到使用 Bitmap；连续签到通过 `BITFIELD` 位运算统计；页面 UV 使用 HyperLogLog | Bitmap、HyperLogLog |
-
-## 技术栈
-
-| 分类 | 组件 |
-| --- | --- |
-| 后端 | Java 8、Spring Boot 2.3.12、Spring MVC、AOP、MyBatis-Plus |
-| 数据 | MySQL 8.x、Redis、Redisson、Lua |
-| 消息与并发 | RocketMQ、Redisson 分布式锁、滑动窗口限流 |
-| AI | Qdrant、OpenAI-Compatible Chat / Embedding API、SSE |
-| 工程工具 | Maven、Docker、Nginx、JMeter |
-
-<a id="architecture"></a>
-
-## 总体架构
-
-```mermaid
-flowchart LR
-    Client["Web / Nginx"] --> API["Spring Boot API"]
-    API --> MySQL["MySQL\n业务数据、订单、任务和 Trace"]
-    API --> Redis["Redis\n缓存、GEO、限流、预扣和锁"]
-    API --> MQ["RocketMQ\n订单、延迟关单和 DLQ"]
-    API --> AI["AI 导购服务"]
-    AI --> Qdrant["Qdrant\n向量知识库"]
-    AI --> Model["Chat / Embedding API"]
-```
-
-### 1. 店铺缓存重建与删除
-
-```mermaid
-flowchart TD
-    A["查询店铺详情"] --> B{"BloomFilter 是否可能存在"}
-    B -- "否" --> C["返回不存在"]
-    B -- "是" --> D{"查询缓存"}
-    D -- "命中数据" --> E["返回店铺"]
-    D -- "命中空值" --> C
-    D -- "未命中" --> F{"获取带 TTL 的 SETNX 锁"}
-    F -- "失败" --> G["短暂等待后重试"]
-    F -- "成功" --> H["查询 MySQL"]
-    H --> I{"店铺是否存在"}
-    I -- "否" --> J["写入短 TTL 空值"]
-    I -- "是" --> K["写入随机 TTL 缓存"]
-    J --> L["Lua 比较持有者后释放锁"]
-    K --> L
-```
-
-店铺更新在 MySQL 事务提交后，通过 `afterCommit` 删除 `cache:shop:{shopId}`。事务回滚时不删除缓存，也不创建知识同步任务。
-
-### 2. 秒杀异步下单与失败补偿
-
-```mermaid
-flowchart TD
-    A["秒杀请求"] --> B["滑动窗口限流"]
-    B --> C["seckill.lua\n库存校验 + 一人一单 + Redis 预扣"]
-    C --> D{"发送订单消息"}
-    D -- "失败" --> E["seckill_rollback.lua\n释放 Redis 预扣"]
-    D -- "成功" --> F["返回 orderId"]
-    F --> G["RocketMQ 订单消费者"]
-    G --> H["订单 ID 幂等 + 用户-优惠券唯一约束"]
-    H --> I["同一事务：扣 MySQL 库存、保存订单、创建超时任务"]
-    I --> J{"消费结果"}
-    J -- "失败" --> K["最多重试 5 次"]
-    K --> L["DLQ 消费者执行幂等补偿"]
-    J -- "成功" --> M["确认消费"]
-```
-
-生产者发送失败和 DLQ 最终补偿复用 `seckill_rollback.lua`。脚本只有成功删除 `seckill:reservation:{orderId}` 后才移除用户购买标记并归还库存，因此重复补偿不会多加库存。
-
-### 3. 支付与超时关单
-
-```mermaid
-flowchart TD
-    A["订单创建事务"] --> B["保存 UNPAID 订单"]
-    B --> C["写入 tb_order_timeout_task"]
-    C --> D["定时投递器 CAS 抢占 PENDING 任务"]
-    D --> E{"发送 RocketMQ 延迟消息"}
-    E -- "成功" --> F["标记 SENT"]
-    E -- "失败" --> G["记录错误并指数退避"]
-    G --> D
-    F --> H["延迟关单消费者"]
-    H --> I["获取 order:{orderId} Redisson 锁"]
-    I --> J{"订单状态"}
-    J -- "UNPAID" --> K["关闭订单并仅首次归还库存"]
-    J -- "PAID / CLOSED" --> L["幂等忽略"]
-    P["支付回调"] --> I
-```
-
-支付和关单都只允许从 `UNPAID` 进行状态迁移，后到达的请求不能反转已完成状态。
-
-### 4. RAG、工具调用与请求级 Trace
-
-```mermaid
-flowchart TD
-    A["用户问题"] --> B["保存用户消息和助手占位消息"]
-    B --> C["生成 requestId / traceId"]
-    C --> D{"查询预处理"}
-    D -- "短且明确" --> E["直接 Embedding"]
-    D -- "指代、长输入、多意图" --> F["重写或拆分，最多 3 条查询"]
-    D -- "歧义无法判断" --> G["SSE 返回澄清问题"]
-    F --> E
-    E --> H["Qdrant TopK + 关键词 fallback"]
-    H --> I["类别、商圈、预算约束与候选去重"]
-    I --> J{"是否有可靠资料"}
-    J -- "否" --> K["返回无证据说明"]
-    J -- "是" --> L["快速工具路由或有限步规划"]
-    L --> M["店铺、附近、优惠券、博客只读工具"]
-    M --> N["组装检索资料和实时工具结果"]
-    N --> O["Chat API 流式生成"]
-    O --> P["SSE 输出、保存消息与请求日志"]
-```
-
-原始问题用于会话保存、工具决策和最终回答；重写结果只用于检索。没有可靠业务资料时，系统直接拒答，不把无关候选交给模型生成事实性回答。
-
-每次 `/ai/conversations/{conversationId}/chat` 调用建立独立 Trace：
-
-```text
-CHAT
-├── SSE_STREAM
-├── QUERY_PREPROCESS
-├── RETRIEVAL
-│   ├── EMBEDDING
-│   ├── QDRANT_SEARCH
-│   ├── KEYWORD_SEARCH
-│   └── RESULT_MERGE
-├── AGENT_ROUTE
-│   ├── AGENT_PLAN（按需）
-│   └── TOOL_CALL × N
-├── FINAL_MODEL
-└── MESSAGE_PERSIST
-```
-
-`message_start`、`message_end` 和 `error` SSE 事件都会返回服务端生成的 `requestId` 与 `traceId`。根 Trace、Span、模型日志和工具日志均按 `traceId` 关联；工具还具有独立 `toolCallId`。Span 仅保留模式、数量、店铺 ID、模型和 Token 等脱敏属性，默认保留 30 天。
-
-### 5. 知识库增量同步
-
-```mermaid
-flowchart TD
-    A["店铺 / 优惠券 / 博客变更"] --> B["业务事务提交"]
-    B --> C["异步创建或合并同步任务"]
-    C --> D["PENDING"]
-    D --> E["Worker 按 taskId + version CAS 抢占"]
-    E --> F["PROCESSING"]
-    F --> G{"更新 Qdrant"}
-    G -- "成功" --> H["SUCCEEDED"]
-    G -- "失败" --> I["记录 last_error 和 retry_count"]
-    I --> J["指数退避后回到 PENDING"]
-    J --> E
-    K["超时任务扫描"] --> E
-```
-
-任务按 `shop_id` 合并连续变更。已持久化任务在 Qdrant 短暂不可用时会重试，并在服务恢复后同步最新店铺文档。
-
-<a id="verification"></a>
-
-## 验证与故障恢复
-
-### 结果概览
-
-| 验证项 | 口径 | 当前结果 |
-| --- | --- | --- |
-| 可靠性集成测试 | 事务后删缓存、过期锁误删防护、重复订单消息 | `3/3` 通过，`Failures=0`，`Errors=0` |
-| 秒杀压测 | 10,000 个不同 Token、100 张券、30 秒 Ramp-Up | 平均 `333.2 req/s`；订单数和唯一用户数均为 `100`；MySQL/Redis 库存均为 `0` |
-| RAG 混合检索 | 43 条事实类问题、7 条无结果问题 | 相较纯向量检索，Hit@1：`88.37% -> 97.67%`；Hit@3：`93.02% -> 100%`；正确拒答 `7/7` |
-| 查询预处理评测 | 40 条固定测试集，其中 35 条可检索、5 条歧义澄清 | 生产链路 Hit@1：`65.71% -> 82.86%`；Hit@3：`71.43% -> 91.43%`；歧义澄清 `5/5` |
-| 请求级 Trace | 真实 AI 请求 | 根 Trace、Span、模型日志和 3 次工具调用可由同一 `traceId` 精确还原 |
-
-以上 Hit@K 只衡量正确店铺是否被召回，不等同于最终模型回答准确率。
-
-### 关键故障处理
-
-| 故障点 | 处理方式 | 一致性边界 |
-| --- | --- | --- |
-| 缓存锁过期后被重新获取 | 唯一持有者标识 + Lua 比较删除 | 旧线程不能删除新锁 |
-| RocketMQ 订单消息发送失败 | Lua 回滚 Redis 预扣 | 订单级预占标记保证最多归还一次 |
-| 消费重试耗尽 | DLQ 消费者执行幂等补偿 | 重复死信不会重复增加库存 |
-| 延迟消息投递失败 | 任务表记录错误并指数退避 | CAS 避免同版本任务重复投递 |
-| 支付与关单竞争 | 订单锁 + 状态条件更新 | 已支付订单不被关闭，已关闭订单不被反向支付 |
-| Qdrant 暂时不可用 | 持久化同步任务重试和超时恢复 | 已落库任务恢复后同步最新文档 |
-| 单个只读工具失败 | 记录失败 Span 和工具日志，隔离异常 | 不直接中断 SSE 主链路 |
-
-### 验证材料
-
-| 文档 | 内容 |
-| --- | --- |
-| [秒杀压测记录](docs/project-proof/seckill-pressure-test.md) | JMeter 参数、业务拒绝口径和原始聚合指标 |
-| [秒杀对账 SQL](docs/project-proof/seckill-verify.sql) | 订单数、唯一用户数、MySQL/Redis 库存核对 |
-| [可靠性验证](docs/project-proof/reliability-verification.md) | 缓存锁、重复消费、MQ 发送失败和 DLQ 补偿 |
-| [支付与关单竞争](docs/project-proof/payment-timeout-race.md) | 支付先到、关单先到和重复延迟消息 |
-| [RAG 评测报告](docs/project-proof/rag-evaluation.md) | 50 条案例的指标、口径和失败样例 |
-| [查询重写评测](docs/project-proof/query-rewrite-evaluation.md) | A/B/C/D 对照、模式判断和 Bad Case |
-| [知识同步故障恢复](docs/project-proof/knowledge-sync-failure.md) | Qdrant 中断、任务重试与恢复记录 |
-| [AI 调用 Trace](docs/project-proof/ai-agent-trace.md) | 两条真实请求的检索、工具、SSE、耗时和 Token |
-| [请求级 Trace 设计](docs/project-proof/ai-request-trace.md) | 标识、Span、失败降级、隐私和保留策略 |
-| [Trace 导出 SQL](docs/project-proof/ai-agent-trace-export.sql) | 通过 `traceId` 导出完整调用链 |
+- [快速开始](#quick-start)
+- [核心能力](#capabilities)
+- [关键设计决策](#decisions)
+- [接口与代码索引](#reference)
+- [验证材料清单](#evidence-index)
+- [项目边界](#boundaries)
 
 <a id="quick-start"></a>
 
 ## 快速开始
 
-### 1. 环境要求
+### 环境
 
-- JDK 8
-- Maven 3.8+
-- MySQL 8.x
-- Redis 6+
-- RocketMQ NameServer 与 Broker
-- Docker（运行 Qdrant）
-- 可选：Nginx（静态前端与 `/api` 反向代理）
+JDK 8 / Maven 3.8+ / MySQL 8.x / Redis 6+ / RocketMQ / Docker（Qdrant）
 
-### 2. 初始化数据库
+### 1. 数据库
 
 ```sql
 CREATE DATABASE hmdp DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 ```
 
-新环境执行 [hmdp.sql](src/main/resources/db/hmdp.sql)。已有数据库按时间顺序执行 `src/main/resources/db/upgrade_*.sql`；请求级 Trace 改造需要额外执行 [upgrade_20260731_ai_request_trace.sql](src/main/resources/db/upgrade_20260731_ai_request_trace.sql)。
+新环境执行 `src/main/resources/db/hmdp.sql`。已有数据库按时间顺序执行 `src/main/resources/db/upgrade_*.sql`。
 
-### 3. 本地配置
+### 2. 配置
 
-创建 `src/main/resources/application-local.yaml`。该文件已被 Git 忽略，不要提交密码、IP 或 API Key。
+创建 `src/main/resources/application-local.yaml`（已 gitignore）：
 
 ```yaml
 spring:
@@ -286,124 +48,308 @@ rocketmq:
   name-server: 127.0.0.1:9876
 ```
 
-在 IDE 运行配置中添加：
+启动时通过环境变量注入 AI 服务配置（详见 `application.yaml` 中 `ai.*` 段），默认 `ai.chat.provider=mock` 和 `ai.embedding.provider=disabled`。不配置外部 AI 服务也可以启动核心业务和 Mock AI 对话；真实 RAG 需要配置 Embedding 服务并启动 Qdrant。
 
-```text
---spring.profiles.active=local
-
-AI_CHAT_PROVIDER=openai-compatible
-AI_CHAT_BASE_URL=https://your-provider/v1/chat/completions
-AI_CHAT_MODEL=your-chat-model
-AI_CHAT_API_KEY=your-chat-api-key
-
-AI_EMBEDDING_PROVIDER=openai-compatible
-AI_EMBEDDING_BASE_URL=https://your-provider/v1/embeddings
-AI_EMBEDDING_MODEL=your-embedding-model
-AI_EMBEDDING_API_KEY=your-embedding-api-key
-
-AI_QDRANT_URL=http://127.0.0.1:6333
-AI_QDRANT_API_KEY=your-qdrant-api-key
-```
-
-### 4. 启动 Qdrant
+### 3. 启动 Qdrant（可选，AI 功能需要）
 
 ```bash
 docker run -d --name qdrant --restart unless-stopped \
   -p 6333:6333 \
-  -e QDRANT__SERVICE__API_KEY=your-qdrant-api-key \
+  -e QDRANT__SERVICE__API_KEY=your-api-key \
   -v qdrant-storage:/qdrant/storage \
   qdrant/qdrant:v1.18.2
 ```
 
-首次构建知识库时临时增加：
-
-```text
-AI_KNOWLEDGE_REBUILD_ON_START=true
-```
-
-看到 `Shop knowledge rebuild completed` 后移除该变量；后续业务变更使用增量同步。
-
-### 5. 启动应用与前端
+### 4. 启动
 
 ```bash
-mvn spring-boot:run
+mvn spring-boot:run -Dspring-boot.run.profiles=local
 ```
 
-后端默认地址为 `http://localhost:8081`。静态前端位于 `frontend/app`，Nginx 配置示例位于 `frontend/nginx/nginx.conf.example`。
+后端 `http://localhost:8081`，前端静态文件位于 `frontend/app`，Nginx 配置示例见 `frontend/nginx/nginx.conf.example`。
 
-### 6. 运行验证
+### 5. 运行验证
 
 ```bash
-# 缓存、消息幂等、DLQ 和超时关单相关集成测试
+# 缓存、消息幂等、DLQ 和超时关单集成测试
 mvn -q -Dtest=ReliabilityIntegrationTest test
 
-# AI Trace、查询预处理、检索与工具异常隔离测试
-mvn -q "-Dtest=AiTraceCoreTest,AiReadOnlyToolTraceTest,AiQueryPreprocessorTest,AiConversationQueryRewriteTest,ShopKnowledgeServiceImplTest" test
+# AI Trace、查询预处理、检索与工具隔离测试
+mvn -q -Dtest="AiTraceCoreTest,AiReadOnlyToolTraceTest,AiQueryPreprocessorTest,AiConversationQueryRewriteTest,ShopKnowledgeServiceImplTest" test
 
-# 生成 JMeter 使用的 10,000 个用户 Token
+# 生成 JMeter 10,000 个用户 Token
 mvn -q -Dtest=HmDianPingApplicationTests#prepareJmeterTokens test
 ```
 
-重新运行检索评测时，设置 `AI_EVALUATION_ENABLED=true`：`AI_EVALUATION_MODE=rag` 运行混合检索评测，`AI_EVALUATION_MODE=query-rewrite` 运行查询预处理评测，`all` 同时运行两者。评测会更新 CSV 和报告，结束后应关闭该变量。
+<a id="capabilities"></a>
 
-一次 AI 聊天的 `message_start`、`message_end` 和 `error` 都携带 `traceId`。将该值填入 [ai-agent-trace-export.sql](docs/project-proof/ai-agent-trace-export.sql)，即可导出根状态、Span、模型日志和工具日志。
+## 核心能力
 
-<a id="code-map"></a>
+### 店铺缓存治理
+
+**问题**：高并发查询下，缓存穿透（大量查询不存在的店铺 ID）、击穿（热点店铺缓存过期时大量请求打到 MySQL）和雪崩（批量 key 同时过期）。
+
+**方案**：
+
+- Redisson `RBloomFilter` 前置拦截不存在的 ID，防止穿透
+- `SETNX` 互斥锁（10s TTL + Lua 脚本比较持有者后释放），同一时刻只有一个线程重建缓存
+- `RedisData` 逻辑过期包装——缓存过期后返回旧数据，后台线程异步重建，避免击穿
+- 随机 TTL 防止批量 key 同时过期
+- 缓存更新在 MySQL 事务 `afterCommit` 后删除；事务回滚不删缓存
+
+```mermaid
+flowchart TD
+    A["查询店铺"] --> B{"BloomFilter"}
+    B -- "不存在" --> C["直接返回"]
+    B -- "可能存在" --> D{"查缓存"}
+    D -- "命中" --> E["返回"]
+    D -- "未命中" --> F{"获取 SETNX 锁（10s TTL）"}
+    F -- "失败" --> G["sleep 50ms 后重试"]
+    F -- "成功" --> H["查 MySQL"]
+    H --> I{"存在？"}
+    I -- "否" --> J["写空值缓存（短 TTL）"]
+    I -- "是" --> K["写缓存（随机 TTL）"]
+    J --> L["Lua 比较持有者 → 释放锁"]
+    K --> L
+```
+
+**证据**：[可靠性验证](docs/project-proof/reliability-verification.md) — 事务后删缓存、过期锁误删防护均通过。
+
+[↑ 回到导航](#nav)
+
+### 可靠异步秒杀
+
+**问题**：秒杀场景下库存扣减和一人一单校验必须原子化；异步下单时消息发送可能失败；消费重试耗尽后库存永久丢失。
+
+**方案**：
+
+```mermaid
+flowchart TD
+    A["秒杀请求"] --> B["滑动窗口限流（5 req/s per user）"]
+    B --> C["seckill.lua 原子执行\n库存校验 + 一人一单 + Redis 预扣"]
+    C --> D{"RocketMQ syncSend"}
+    D -- "失败" --> E["seckill_rollback.lua\n立即回滚 Redis 预扣"]
+    D -- "成功" --> F["返回 orderId"]
+    F --> G["VoucherOrderConsumer\nRedisson 锁 + 幂等校验"]
+    G --> H["同事务：扣库存 + 保存订单 + 创建超时任务"]
+    H --> I{"消费结果"}
+    I -- "重试 5 次后仍失败" --> J["DLQ 消费者\n幂等补偿恢复库存"]
+    I -- "成功" --> K["确认消费"]
+```
+
+每一层的失败都有补偿路径：
+
+| 故障点 | 处理 | 一致性保证 |
+|---|---|---|
+| RocketMQ 发送失败 | 同步检查 `SendStatus`，失败立即 Lua 回滚 | 订单级幂等标记防止重复回滚 |
+| 消费失败（业务异常） | RocketMQ 重试 5 次 | 用户-优惠券联合唯一索引 |
+| 重试耗尽 | DLQ 消费者执行补偿 | 回滚脚本按 orderId 去重 |
+| 重复消费 | orderId 幂等 + DB 唯一约束 | 重复消息不重复扣库存 |
+
+**证据**：[秒杀压测](docs/project-proof/seckill-pressure-test.md) 使用 10,000 个不同用户令牌，在 30 秒 Ramp-Up 内发起 100 张券的抢购请求，平均吞吐约 **333 req/s**；订单数和唯一用户数均为 **100**，MySQL/Redis 库存均为 **0**（无超卖）。该吞吐是本次压测场景的平均值，不代表系统最大承载 QPS。[对账 SQL](docs/project-proof/seckill-verify.sql) 可独立核实。
+
+[↑ 回到导航](#nav)
+
+### 支付与超时关单
+
+**问题**：15 分钟支付窗口内，支付回调与超时关单可能并发，导致已支付订单被误关或已关订单被反向支付；延迟消息投递失败会导致关单任务丢失。
+
+**方案**：
+
+```mermaid
+flowchart TD
+    A["订单创建事务"] --> B["UNPAID 订单"]
+    B --> C["tb_order_timeout_task（同事务）"]
+    C --> D["@Scheduled 扫描器\nCAS 抢占 PENDING 任务（version 乐观锁）"]
+    D --> E{"发送 RocketMQ 延迟消息\nsyncSendDelayTimeMills"}
+    E -- "成功" --> F["标记 SENT"]
+    E -- "失败" --> G["指数退避后重新调度"]
+    G --> D
+    F --> H["延迟消息触发关单"]
+    P["支付回调"] --> I["获取 lock:order:{orderId}"]
+    H --> I
+    I --> J{"订单状态？"}
+    J -- "UNPAID → PAID" --> K["支付成功，取消关单任务"]
+    J -- "UNPAID → CANCELLED" --> L["关单，恢复 MySQL + Redis 库存"]
+    J -- "已终态" --> M["幂等忽略"]
+```
+
+- **共享锁**：支付和关单使用同一个 `lock:order:{orderId}` Redisson 锁，后到达的请求不能反转已完成的迁移
+- **DB 任务表**：关单任务和订单在同一事务落库，不会丢；version CAS 防止重复投递
+- **指数退避**：延迟消息发送失败时不立即重试，避免雪崩
+
+**证据**：[支付与关单竞争](docs/project-proof/payment-timeout-race.md) 覆盖支付先到、关单先到和重复延迟消息三个场景。
+
+[↑ 回到导航](#nav)
+
+### 混合 RAG 检索
+
+**问题**：用户问题可能包含指代（"第一家怎么样"）、多意图（"推荐火锅同时预算 100"）、长输入；仅靠向量检索在口语化查询上召回不准。
+
+**方案**：
+
+```mermaid
+flowchart TD
+    A["用户问题"] --> B["查询预处理"]
+    B -- "需重写的指代/长文本/多意图" --> C["LLM 改写为独立查询"]
+    B -- "多意图" --> D["拆分为 ≤3 条子查询"]
+    B -- "歧义无法消解" --> E["SSE 返回澄清问题，不调用检索与工具"]
+    B -- "短且明确" --> F["直接嵌入"]
+    C --> F
+    D --> F
+    F --> G["Qdrant 向量检索（店铺画像 + 公开探店笔记）"]
+    G --> H["关键词 fallback + 结构化约束（商圈/预算/品类）"]
+    H --> I{"是否有可靠资料？"}
+    I -- "否" --> J["返回'暂无相关信息'，不编造"]
+    I -- "是" --> K["实时工具校验（如有效优惠券） → Chat 流式生成"]
+```
+
+- **改写与检索分离**：改写结果只用于检索，原始问题保留用于对话和工具决策
+- **无证据拒答**：没有业务资料支撑时直接拒答，不依赖模型常识编造
+- **关键词 fallback**：启用 fallback 后执行 MySQL 关键词搜索，并与经过结构化约束的向量结果合并去重；向量相似度阈值 `0.35` 用于判断纯向量结果是否可靠
+
+**证据**：[会话级端到端评测](docs/project-proof/rag-conversation-evaluation-evidence.md) 40 条冻结多轮用例，真实 `chat()` + SSE + 工具 + Trace 执行，人工复核 **37/40 正确（92.5%）**。3 个失败用例（CE018/CE019/CE038）已记录根因。
+
+[↑ 回到导航](#nav)
+
+### 请求级 Trace
+
+**问题**：一次 AI 请求可能经过查询改写 → 向量检索 → Agent 规划 → 工具调用 → 模型生成 → SSE 推送 → 消息持久化 7 个阶段，出问题时无法定位是哪个环节出错。
+
+**方案**：
+
+每次 `/ai/conversations/{conversationId}/chat` 生成独立 `requestId` 和 `traceId`，全链路传递：
+
+```text
+CHAT
+├── SSE_STREAM
+├── QUERY_PREPROCESS → QUERY_REWRITE_MODEL
+├── RETRIEVAL → EMBEDDING / QDRANT_SEARCH / KEYWORD_SEARCH / RESULT_MERGE
+├── AGENT_ROUTE → AGENT_PLAN / TOOL_CALL × N
+├── FINAL_MODEL
+└── MESSAGE_PERSIST
+```
+
+- `message_start`、`message_end` 和 `error` SSE 事件均携带 `requestId` + `traceId`
+- 根 Trace、Span、模型日志、工具日志按 `traceId` 关联，工具另有独立 `toolCallId`
+- Span 仅保留脱敏属性（模式、数量、店铺 ID、模型、Token），默认保留 30 天
+- 异步线程通过 MDC 传播 trace 上下文
+
+**证据**：将 `traceId` 填入 [trace 导出 SQL](docs/project-proof/ai-agent-trace-export.sql) 即可还原该次请求的完整调用链。[Trace 示例](docs/project-proof/ai-agent-trace.md) 记录了两次真实请求的检索、工具、SSE、耗时和 Token。
+
+[↑ 回到导航](#nav)
+
+### 增量知识同步
+
+**问题**：店铺/优惠券/博客变更后，Qdrant 向量库需要同步更新；Qdrant 短暂不可用时不能丢失任务。
+
+**方案**：
+
+```mermaid
+flowchart TD
+    A["业务变更（店铺/优惠券/博客）"] --> B["事务提交"]
+    B --> C["@TransactionalEventListener(AFTER_COMMIT)\n异步创建同步任务"]
+    C --> D["PENDING"]
+    D --> E["@Scheduled Worker\n按 taskId + version CAS 抢占"]
+    E --> F["PROCESSING"]
+    F --> G{"更新 Qdrant（删旧 + 嵌入 + upsert）"}
+    G -- "成功" --> H["SUCCEEDED"]
+    G -- "失败" --> I["指数退避后回到 PENDING"]
+    I --> E
+    K["超时恢复扫描"] --> E
+```
+
+- **持久化优先**：已落库的任务再由 Worker 异步执行，Qdrant 不可用时通过重试恢复；业务提交到任务落库之间仍存在极小的进程崩溃窗口
+- **合并连续变更**：同一 shop 的多次变更合并为一条任务（`INSERT ... ON DUPLICATE KEY`）
+- **故障恢复**：超时扫描器回收卡在 PROCESSING 状态的任务
+
+**证据**：[知识同步故障恢复](docs/project-proof/knowledge-sync-failure.md) 记录了 Qdrant 中断期间任务重试与服务恢复后同步最新文档的过程。
+
+[↑ 回到导航](#nav)
+
+<a id="decisions"></a>
+
+## 关键设计决策
+
+### 为什么从 Redis Stream 切到 RocketMQ
+
+最初的秒杀异步下单用 Redis Streams + `StreamMessageListenerContainer` 实现。三个痛点：
+
+1. **消息发送无确认**：`XADD` 成功后即返回，如果消费者永远不会 ACK（例如 bug 导致消息格式错误），消息沉在 Stream 里没有 DLQ 兜底
+2. **消费者恢复不可控**：Spring Data Redis 的 Stream 监听器异常处理不透明，重试行为依赖框架版本
+3. **延迟消息需自建**：关单需要 15 分钟延迟投递，Redis Streams 不支持，得另起一套定时轮询
+
+切到 RocketMQ 后：`syncSend` 返回 `SendStatus` 可立即判断发送成败；重试 5 次 + DLQ 形成完整兜底链；`syncSendDelayTimeMills` 原生支持毫秒级延迟消息。
+
+### 为什么关单用 DB 任务表而不是纯延迟消息
+
+RocketMQ 延迟消息本身没有持久化“这个关单任务已创建”的业务记录。单独依赖延迟消息时，发送结果未知或 Broker 异常后缺少可靠的补投和对账依据。任务表存在 MySQL 里并与订单同事务落库——只要订单创建成功，关单任务就具备可扫描、可重试的记录。
+
+### 为什么 Agent maxSteps 设为 1
+
+每增加一个 step 意味着多一次 Chat API 往返（约 2-5 秒）。在当前业务范围（只开放 4 个只读工具，查询模式固定），一步规划即可覆盖所有场景。多步留给未来工具扩展时再打开。
+
+[↑ 回到导航](#nav)
+
+<a id="reference"></a>
 
 ## 接口与代码索引
 
-### 常用接口
+### 主要接口
 
-| 场景 | 方法与路径 |
-| --- | --- |
-| 秒杀下单 | `POST /voucher-order/seckill/{voucherId}` |
-| 模拟支付 | `POST /payment/simulate/{orderId}` |
-| 创建 AI 会话 | `POST /ai/conversations` |
-| 会话列表 | `GET /ai/conversations?current=1` |
-| 会话消息 | `GET /ai/conversations/{conversationId}/messages` |
-| 重命名会话 | `PATCH /ai/conversations/{conversationId}` |
-| 删除会话 | `DELETE /ai/conversations/{conversationId}` |
-| SSE AI 对话 | `POST /ai/conversations/{conversationId}/chat` |
+| 场景 | 方法与路径 | 认证 |
+|---|---|---|
+| 秒杀下单 | `POST /voucher-order/seckill/{voucherId}` | 需要 |
+| 模拟支付 | `POST /payment/simulate/{orderId}` | 需要 |
+| 店铺详情（缓存） | `GET /shop/{id}` | 不需要 |
+| 附近店铺（GEO） | `GET /shop/of/type?typeId=&x=&y=` | 不需要 |
+| 博客点赞/取消 | `PUT /blog/like/{id}` | 需要 |
+| 关注 Feed 流 | `GET /blog/of/follow?lastId=&offset=` | 需要 |
+| 签到 | `POST /user/sign` | 需要 |
+| AI 对话（SSE） | `POST /ai/conversations/{conversationId}/chat` | 需要 |
+| AI 会话列表 | `GET /ai/conversations` | 需要 |
 
-受保护接口需要请求头：
-
-```http
-Authorization: {token}
-```
+受保护接口需请求头 `Authorization: {token}`。
 
 ### 核心实现入口
 
-| 模块 | 主要实现 |
-| --- | --- |
-| 店铺缓存治理 | [ShopServiceImpl](src/main/java/com/hmdp/service/impl/ShopServiceImpl.java)、[SimpleRedisLock](src/main/java/com/hmdp/utils/SimpleRedisLock.java)、[unlock.lua](src/main/resources/unlock.lua) |
-| 秒杀下单与补偿 | [VoucherOrderServiceImpl](src/main/java/com/hmdp/service/impl/VoucherOrderServiceImpl.java)、[VoucherOrderConsumer](src/main/java/com/hmdp/mq/VoucherOrderConsumer.java)、[VoucherOrderDeadLetterConsumer](src/main/java/com/hmdp/mq/VoucherOrderDeadLetterConsumer.java) |
-| 超时关单与支付竞争 | [OrderTimeoutTaskServiceImpl](src/main/java/com/hmdp/service/impl/OrderTimeoutTaskServiceImpl.java)、[OrderTimeoutListener](src/main/java/com/hmdp/mq/OrderTimeoutListener.java)、[PaymentServiceImpl](src/main/java/com/hmdp/service/impl/PaymentServiceImpl.java) |
-| RAG 与查询预处理 | [AiQueryPreprocessor](src/main/java/com/hmdp/ai/AiQueryPreprocessor.java)、[ShopKnowledgeServiceImpl](src/main/java/com/hmdp/service/impl/ShopKnowledgeServiceImpl.java)、[QdrantKnowledgeClient](src/main/java/com/hmdp/ai/QdrantKnowledgeClient.java) |
-| AI 对话与 Trace | [AiConversationServiceImpl](src/main/java/com/hmdp/service/impl/AiConversationServiceImpl.java)、[AiTraceServiceImpl](src/main/java/com/hmdp/service/impl/AiTraceServiceImpl.java)、[AiReadOnlyToolServiceImpl](src/main/java/com/hmdp/service/impl/AiReadOnlyToolServiceImpl.java) |
+| 模块 | 文件 |
+|---|---|
+| 店铺缓存 | [`ShopServiceImpl`](src/main/java/com/hmdp/service/impl/ShopServiceImpl.java) · [`SimpleRedisLock`](src/main/java/com/hmdp/utils/SimpleRedisLock.java) · [`unlock.lua`](src/main/resources/unlock.lua) |
+| 秒杀下单 | [`VoucherOrderServiceImpl`](src/main/java/com/hmdp/service/impl/VoucherOrderServiceImpl.java) · [`VoucherOrderConsumer`](src/main/java/com/hmdp/mq/VoucherOrderConsumer.java) · [`VoucherOrderDeadLetterConsumer`](src/main/java/com/hmdp/mq/VoucherOrderDeadLetterConsumer.java) · [`seckill.lua`](src/main/resources/seckill.lua) · [`seckill_rollback.lua`](src/main/resources/seckill_rollback.lua) |
+| 关单 & 支付 | [`OrderTimeoutTaskServiceImpl`](src/main/java/com/hmdp/service/impl/OrderTimeoutTaskServiceImpl.java) · [`OrderTimeoutListener`](src/main/java/com/hmdp/mq/OrderTimeoutListener.java) · [`PaymentServiceImpl`](src/main/java/com/hmdp/service/impl/PaymentServiceImpl.java) |
+| RAG 检索 | [`ShopKnowledgeServiceImpl`](src/main/java/com/hmdp/service/impl/ShopKnowledgeServiceImpl.java) · [`QdrantKnowledgeClient`](src/main/java/com/hmdp/ai/QdrantKnowledgeClient.java) |
+| 查询预处理 | [`AiQueryPreprocessor`](src/main/java/com/hmdp/ai/AiQueryPreprocessor.java) |
+| Agent & 工具 | [`AiAgentRunner`](src/main/java/com/hmdp/ai/AiAgentRunner.java) · [`AiReadOnlyToolServiceImpl`](src/main/java/com/hmdp/service/impl/AiReadOnlyToolServiceImpl.java) |
+| AI 对话 & Trace | [`AiConversationServiceImpl`](src/main/java/com/hmdp/service/impl/AiConversationServiceImpl.java) · [`AiTraceServiceImpl`](src/main/java/com/hmdp/service/impl/AiTraceServiceImpl.java) |
+| 知识同步 | [`AiKnowledgeSyncTaskServiceImpl`](src/main/java/com/hmdp/service/impl/AiKnowledgeSyncTaskServiceImpl.java) · [`ShopKnowledgeChangedListener`](src/main/java/com/hmdp/event/ShopKnowledgeChangedListener.java) |
 
-## 项目结构
+[↑ 回到导航](#nav)
 
-```text
-.
-├── frontend/
-│   ├── app/                         # 静态前端
-│   └── nginx/nginx.conf.example     # Nginx 代理示例
-├── docs/project-proof/              # 压测、评测、故障恢复与 Trace
-├── src/main/java/com/hmdp/
-│   ├── ai/                          # Chat、Embedding、RAG、Agent 与 Trace 上下文
-│   ├── controller/                  # HTTP 与 SSE 接口
-│   ├── event/                       # 知识同步事件监听
-│   ├── mq/                          # 订单、关单和 DLQ 消费者
-│   ├── service/impl/                # 业务、任务和 AI 服务实现
-│   └── utils/                       # Redis Key、锁和通用工具
-└── src/main/resources/
-    ├── db/                          # 初始化与升级 SQL
-    ├── *.lua                        # 秒杀、补偿、限流和解锁脚本
-    └── application.yaml             # 不含真实凭据的公共配置
-```
+<a id="evidence-index"></a>
+
+## 验证材料清单
+
+| 验证项 | 文档 | 结论 |
+|---|---|---|
+| 秒杀压测 | [`seckill-pressure-test.md`](docs/project-proof/seckill-pressure-test.md) | 333 req/s，无超卖 |
+| 秒杀对账 SQL | [`seckill-verify.sql`](docs/project-proof/seckill-verify.sql) | 独立验证 SQL |
+| 可靠性验证 | [`reliability-verification.md`](docs/project-proof/reliability-verification.md) | 3/3 通过 |
+| 支付关单竞争 | [`payment-timeout-race.md`](docs/project-proof/payment-timeout-race.md) | 支付/关单/重复消息全覆盖 |
+| 会话级 RAG 评测 | [`rag-conversation-evaluation-evidence.md`](docs/project-proof/rag-conversation-evaluation-evidence.md) | 37/40（92.5%） |
+| 知识同步故障恢复 | [`knowledge-sync-failure.md`](docs/project-proof/knowledge-sync-failure.md) | Qdrant 中断 → 重试 → 恢复 |
+| AI Trace 示例 | [`ai-agent-trace.md`](docs/project-proof/ai-agent-trace.md) | 两条真实请求全链路 |
+| Trace 导出 SQL | [`ai-agent-trace-export.sql`](docs/project-proof/ai-agent-trace-export.sql) | 按 traceId 还原调用链 |
+| 请求级 Trace 设计 | [`ai-request-trace.md`](docs/project-proof/ai-request-trace.md) | 标识、降级、隐私、保留策略 |
+
+<a id="boundaries"></a>
 
 ## 项目边界
 
-- RAG 指标基于固定评测集与当前数据快照，表示检索命中，不代表通用回答准确率。
-- AI 工具只开放店铺、附近店铺、优惠券和公开探店笔记等只读能力；写操作仍由原有业务接口和登录鉴权控制。
-- 知识同步任务在业务提交后异步创建，已落库任务可以依靠重试与超时恢复；业务提交到任务落库之间仍存在极小的进程崩溃窗口。
+- AI 工具只开放店铺、附近店铺、优惠券和公开探店笔记等只读能力；写操作由原有业务接口控制
+- RAG 评测基于固定用例集与当前数据快照，不代表通用回答准确率
+- 知识同步任务在业务提交后异步创建；提交到任务落库之间存在极小进程崩溃窗口
+- 项目面向本地生活场景设计，秒杀和关单的库存模型不适用于多 SKU / 购物车场景
+- AI 服务默认 `mock`/`disabled`，不配置外部 API 也能跑通全部业务功能
+
+[↑ 回到导航](#nav)

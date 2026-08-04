@@ -5,15 +5,16 @@ import com.hmdp.ai.QdrantKnowledgeClient;
 import com.hmdp.ai.ShopKnowledge;
 import com.hmdp.config.AiEmbeddingProperties;
 import com.hmdp.config.AiKnowledgeProperties;
+import com.hmdp.entity.Blog;
 import com.hmdp.entity.Shop;
 import com.hmdp.entity.ShopType;
 import com.hmdp.service.IBlogService;
 import com.hmdp.service.IShopService;
 import com.hmdp.service.IShopTypeService;
-import com.hmdp.service.IVoucherService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -29,6 +30,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -47,9 +49,6 @@ class ShopKnowledgeServiceImplTest {
 
     @Mock
     private IShopTypeService shopTypeService;
-
-    @Mock
-    private IVoucherService voucherService;
 
     @Mock
     private IBlogService blogService;
@@ -72,7 +71,6 @@ class ShopKnowledgeServiceImplTest {
 
         ReflectionTestUtils.setField(service, "shopService", shopService);
         ReflectionTestUtils.setField(service, "shopTypeService", shopTypeService);
-        ReflectionTestUtils.setField(service, "voucherService", voucherService);
         ReflectionTestUtils.setField(service, "blogService", blogService);
         ReflectionTestUtils.setField(service, "embeddingModelClient", embeddingModelClient);
         ReflectionTestUtils.setField(service, "qdrantKnowledgeClient", qdrantKnowledgeClient);
@@ -82,7 +80,6 @@ class ShopKnowledgeServiceImplTest {
         when(shopTypeService.list()).thenReturn(Collections.singletonList(
                 new ShopType().setId(1L).setName("\u7f8e\u98df")
         ));
-        when(voucherService.listEnabledVouchersForKnowledge()).thenReturn(Collections.emptyList());
         when(blogService.list()).thenReturn(Collections.emptyList());
         when(embeddingModelClient.embed(anyList())).thenReturn(
                 Collections.singletonList(Collections.singletonList(0.1F))
@@ -210,15 +207,60 @@ class ShopKnowledgeServiceImplTest {
                 Collections.singletonList(0.1F),
                 Collections.singletonList(0.2F)
         ));
-        when(qdrantKnowledgeClient.search(anyString(), any(List.class), anyInt()))
+        when(qdrantKnowledgeClient.search(anyString(), any(List.class), anyInt(),
+                any(QdrantKnowledgeClient.QdrantFilter.class)))
                 .thenReturn(qdrantResults(shops, 1L, 2L, 3L))
-                .thenReturn(qdrantResults(shops, 1L, 4L, 2L));
+                .thenReturn(Collections.emptyList())
+                .thenReturn(qdrantResults(shops, 1L, 4L, 2L))
+                .thenReturn(Collections.emptyList());
 
         List<ShopKnowledge> result = service.searchRelevantShops(questions, false);
 
         assertEquals(Arrays.asList(1L, 2L, 4L), shopIds(result));
         verify(embeddingModelClient, times(1)).embed(questions);
-        verify(qdrantKnowledgeClient, times(2)).search(anyString(), any(List.class), anyInt());
+        verify(qdrantKnowledgeClient, times(4)).search(anyString(), any(List.class), anyInt(),
+                any(QdrantKnowledgeClient.QdrantFilter.class));
+    }
+
+    @Test
+    void rebuildShouldSeparateStableProfilesFromPublicBlogs() throws Exception {
+        Shop shop = shop(1L, "103\u8336\u9910\u5385", "\u8fd0\u6cb3\u4e0a\u8857", 80L);
+        Blog blog = new Blog()
+                .setId(101L)
+                .setShopId(1L)
+                .setTitle("\u6e2f\u98ce\u8336\u9910\u5385\u63a2\u5e97")
+                .setContent("\u83dc\u54c1\u4e30\u5bcc\uff0c\u9002\u5408\u670b\u53cb\u805a\u9910\u3002");
+        when(shopService.list()).thenReturn(Collections.singletonList(shop));
+        when(blogService.list()).thenReturn(Collections.singletonList(blog));
+        when(embeddingModelClient.embed(anyList())).thenAnswer(invocation -> {
+            List<?> documents = invocation.getArgument(0);
+            List<List<Float>> vectors = new ArrayList<>();
+            for (int index = 0; index < documents.size(); index++) {
+                vectors.add(Collections.singletonList(0.1F));
+            }
+            return vectors;
+        });
+
+        assertEquals(1, service.rebuildShopKnowledge());
+
+        ArgumentCaptor<String> collectionCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<List> pointsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(qdrantKnowledgeClient, times(2)).upsert(collectionCaptor.capture(), pointsCaptor.capture());
+
+        int profileIndex = collectionCaptor.getAllValues().indexOf("shop_knowledge");
+        int blogIndex = collectionCaptor.getAllValues().indexOf("blog_knowledge");
+        assertTrue(profileIndex >= 0);
+        assertTrue(blogIndex >= 0);
+        QdrantKnowledgeClient.QdrantPoint profilePoint = (QdrantKnowledgeClient.QdrantPoint)
+                pointsCaptor.getAllValues().get(profileIndex).get(0);
+        QdrantKnowledgeClient.QdrantPoint blogPoint = (QdrantKnowledgeClient.QdrantPoint)
+                pointsCaptor.getAllValues().get(blogIndex).get(0);
+        assertEquals("shop_profile", profilePoint.getPayload().get("documentType"));
+        assertEquals("public_blog", blogPoint.getPayload().get("documentType"));
+        assertEquals(101L, ((Number) blogPoint.getPayload().get("blogId")).longValue());
+        assertNotNull(profilePoint.getPayload().get("content"));
+        assertFalse(String.valueOf(profilePoint.getPayload().get("content"))
+                .contains("Public blog title"));
     }
 
     private void arrangeVectorResults(List<Shop> shops, Long... resultIds) throws Exception {
@@ -237,7 +279,8 @@ class ShopKnowledgeServiceImplTest {
                     resultId, 0.80D, payload
             ));
         }
-        when(qdrantKnowledgeClient.search(anyString(), any(List.class), anyInt())).thenReturn(results);
+        when(qdrantKnowledgeClient.search(anyString(), any(List.class), anyInt(),
+                any(QdrantKnowledgeClient.QdrantFilter.class))).thenReturn(results);
     }
 
     private List<QdrantKnowledgeClient.QdrantSearchResult> qdrantResults(

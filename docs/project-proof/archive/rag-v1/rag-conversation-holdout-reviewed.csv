@@ -1,0 +1,276 @@
+﻿"case_id","scenario","conversation_id","user_message_id","assistant_message_id","request_id","trace_id","trace_status","outcome","error_stage","message_status","question","expected_shop_names","required_tools","actual_tools","required_tools_invoked","expected_entity_mentioned","execution_completed","automatic_pass","retrieval_ms","tool_ms","first_token_ms","total_ms","input_tokens","output_tokens","error","tool_evidence","manual_status","review_faithfulness","review_constraints","review_coverage","review_realtime_consistency","review_no_evidence_safety","review_failure_stage","review_notes","final_answer"
+"CE001","direct","16","133","134","e83653524dc8442f6ea8496b8496d9ec","43e53bf5d156a31dd435e036d571b015","SUCCEEDED","ANSWERED","","1","103茶餐厅现在有什么优惠券？","103茶餐厅","voucherQuery","shopDetail|voucherQuery","true","true","true","true","1332","137","9032","9979","1375","204","","shopDetail: Live store details:
+- name=103茶餐厅, rating=3.7/5, averageSpend=80 CNY, address=金华路锦昌文华苑29号, openingHours=10:00-22:00
+
+---
+voucherQuery: Live voucher query:
+- shopId=1, title=50元代金券, pay=47.50 CNY, value=50.00 CNY, rules=全场通用\n无需预约\n可无限叠加\不兑现、不找零\n仅限堂食
+- shopId=1, title=100元代金券, pay=80.00 CNY, value=100.00 CNY, rules=全场通用\n无需预约\n可无限叠加\不兑现、不找零\n仅限堂食, validUntil=2026-10-26T12:09:04
+- shopId=1, title=JMeter 10000人抢100券, pay=0.01 CNY, value=0.01 CNY, rules=压测专用, validUntil=2026-08-31T23:59:59
+- shopId=1, title=JMeter 10000人抢100券-第二轮, pay=0.01 CNY, value=0.01 CNY, rules=压测专用, validUntil=2026-08-31T23:59:59
+- shopId=1, title=JMeter 10000人抢100券-第三轮, pay=0.01 CNY, value=0.01 CNY, rules=压测专用, validUntil=2026-08-31T23:59:59
+","PASS","PASS","N/A","PASS","PASS","N/A","","","103茶餐厅目前有这些优惠券：
+
+1. **50元代金券**：47.5元抵50元，全场通用，无需预约，可无限叠加，不兑现不找零，仅限堂食。2. **100元代金券**：80元抵100元，全场通用，无需预约，可无限叠加，不兑现不找零，仅限堂食，有效期至2026-10-26。3.另有3张标注“压测专用”的测试券（0.01元），非普通用户优惠，不建议视为可用券。"
+"CE002","direct","17","135","136","fa16e51cf518fc6fcd35dd0d90683bb0","6c94c9f83be3ae8e96d63c5447ffb839","SUCCEEDED","ANSWERED","","1","新白鹿餐厅营业到几点？","新白鹿餐厅","shopDetail","shopDetail","true","true","true","true","385","56","1567","1739","557","30","","shopDetail: Live store details:
+- name=新白鹿餐厅(运河上街店), rating=4.7/5, averageSpend=61 CNY, address=台州路2号运河上街购物中心F5, openingHours=10:30-21:00
+","PASS","PASS","N/A","PASS","PASS","N/A","","","新白鹿餐厅(运河上街店)的营业时间是 **10:30-21:00**。"
+"CE003","direct","18","137","138","b7864b58bb850e01c51d08fdd27bee01","c4ca7d95c7873b1ef63feb3dc7ee2e28","SUCCEEDED","ANSWERED","","1","炉鱼的人均和地址分别是什么？","炉鱼","shopDetail","shopDetail","true","true","true","true","3402","52","4708","4959","1935","65","","shopDetail: Live store details:
+- name=炉鱼(拱墅万达广场店), rating=4.7/5, averageSpend=85 CNY, address=杭行路666号万达商业中心4幢2单元409室(铺位号4005), openingHours=00:00-24:00
+- name=山岚炭火料理, rating=3.9/5, averageSpend=107 CNY, address=富春路95号2层, openingHours=10:30-21:30
+- name=新白鹿餐厅(运河上街店), rating=4.7/5, averageSpend=61 CNY, address=台州路2号运河上街购物中心F5, openingHours=10:30-21:00
+","PASS","PASS","N/A","PASS","PASS","N/A","","","炉鱼（拱墅万达广场店）人均约 **85元**，地址在 **杭行路666号万达商业中心4幢2单元409室（铺位号4005）**。"
+"CE004","direct","19","139","140","a6d946c7239d5155536d797bb70b5931","40d5921b91f0eb24f69a1fbf21a29957","SUCCEEDED","ANSWERED","","1","浅草屋寿司有公开探店笔记吗？","浅草屋寿司","blogSearch","shopDetail|blogSearch","true","false","true","true","274","84","1867","1961","584","18","","shopDetail: Live store details:
+- name=浅草屋寿司（运河上街店）, rating=4.6/5, averageSpend=88 CNY, address=拱墅区金华路80号运河上街B1, openingHours= 11:00-21:30
+
+---
+blogSearch: Live blog query: no public blog was found for the candidate stores.","PASS","PASS","N/A","PASS","PASS","PASS","","","目前没有公开的探店笔记。"
+"CE005","direct","20","141","142","a1b1fe7ea65e9a5f24abfea8a76978d5","4a531eb5d2ec7768e931b9ae58166539","SUCCEEDED","ANSWERED","","1","开乐迪KTV的评分和地址是什么？","开乐迪KTV","shopDetail","shopDetail","true","true","true","true","268","48","1347","1563","717","52","","shopDetail: Live store details:
+- name=开乐迪KTV（运河上街店）, rating=3.7/5, averageSpend=67 CNY, address=台州路2号运河上街购物中心F4, openingHours=00:00-24:00
+","PASS","PASS","N/A","PASS","PASS","N/A","","","开乐迪KTV（运河上街店）的评分是 **3.7/5**，地址是 **台州路2号运河上街购物中心F4**。"
+"CE006","direct","21","143","144","cd81376974ea2f185b145c1f096167b9","2d8999b1341bcd4a3b8507a4d2d55352","SUCCEEDED","ANSWERED","","1","海底捞火锅几点关门？","海底捞火锅","shopDetail","shopDetail","true","true","true","true","241","47","1836","2028","592","53","","shopDetail: Live store details:
+- name=海底捞火锅(水晶城购物中心店）, rating=4.9/5, averageSpend=104 CNY, address=上塘路458号水晶城购物中心F6, openingHours=10:00-07:00
+","PASS","PASS","N/A","PASS","PASS","N/A","","","海底捞火锅（水晶城购物中心店）营业时间为10:00至次日07:00，关门时间是早上7点。"
+"CE007","direct","22","145","146","2cbf975e32aa659506a96e06756575ab","9987e37590be24d8d7cbe9e6ab80562f","SUCCEEDED","ANSWERED","","1","Mamala西餐厅有什么特色？","Mamala西餐厅","","","true","false","true","true","258","19","5197","6573","757","261","","","PASS","PASS","N/A","PASS","N/A","PASS","","未编造店铺特色，明确说明资料不足。","根据现有资料，只能查到 **Mamala(杭州远洋乐堤港店)**的基本信息：
+
+- **人均**：290元- **评分**：4.9/5- **营业时间**：11:00-22:00- **地址**：丽水路66号远洋乐堤港商城2期1层B115号不过，资料里**没有直接说明这家店的菜品特色**。有一条热门评论提到“战斧牛排”和花园餐厅，但内容实际指向另一家餐厅（小筑里），不能作为Mamala的特色依据。
+
+建议你问得更具体些，比如“Mamala有什么推荐菜”或“环境如何”，我再帮你查查看。"
+"CE008","direct","23","147","148","a4105c1f17d92a82e868e15d58930ead","fee64b1741f419d6035f5dd66fa16256","SUCCEEDED","ANSWERED","","1","星聚会KTV是否有优惠券？","星聚会KTV","voucherQuery","shopDetail|voucherQuery","true","true","true","true","385","88","1429","1853","571","87","","shopDetail: Live store details:
+- name=星聚会KTV(拱墅区万达店), rating=4.7/5, averageSpend=60 CNY, address=杭行路666号万达广场C座1-2F, openingHours=10:00-22:00
+
+---
+voucherQuery: Live voucher query: no currently available voucher was found for the candidate stores.","PASS","PASS","N/A","PASS","PASS","N/A","","","根据当前查询结果，星聚会KTV（拱墅区万达店）目前没有可用的优惠券。建议你关注店铺页面或到店咨询，优惠活动可能会有更新。"
+"CE009","context-reference","24","151","152","d9d5c64d12062709752ee2910ba5fc69","1b2a78bed622468bea77e049a29211e4","SUCCEEDED","CLARIFIED","","1","它开到几点？","炉鱼","shopDetail","","false","false","true","false","1713","0","1748","1782","0","59","","","FAIL","N/A","N/A","FAIL","FAIL","N/A","QUERY_UNDERSTANDING","测试上下文已唯一指向炉鱼，却未解析“它”，直接澄清。","我还不能确定你指的是哪一家店，请告诉我具体店名，或说明是上一条回复中的第几家。"
+"CE010","context-reference","25","155","156","d37a7cfe0402aafbeb0c69335f8b815d","96dffccc94edf3c4a7b23e9da1427e03","SUCCEEDED","ANSWERED","","1","它有什么优惠？","浅草屋寿司","voucherQuery","shopDetail|voucherQuery","true","true","true","true","292","71","2280","2625","705","75","","shopDetail: Live store details:
+- name=浅草屋寿司（运河上街店）, rating=4.6/5, averageSpend=88 CNY, address=拱墅区金华路80号运河上街B1, openingHours= 11:00-21:30
+
+---
+voucherQuery: Live voucher query: no currently available voucher was found for the candidate stores.","PASS","PASS","N/A","PASS","PASS","N/A","","","目前没有查询到浅草屋寿司（运河上街店）有可用的优惠券或优惠活动。建议关注店铺页面或到店咨询最新活动。"
+"CE011","context-reference","26","159","160","a245457ba491575b110d9b88f349738d","4d8e9fe0265e390fa42579967a40bbfd","SUCCEEDED","ANSWERED","","1","那里有公开探店笔记吗？","103茶餐厅","blogSearch","shopDetail|blogSearch","true","true","true","true","235","67","4236","5872","1720","339","","shopDetail: Live store details:
+- name=103茶餐厅, rating=3.7/5, averageSpend=80 CNY, address=金华路锦昌文华苑29号, openingHours=10:00-22:00
+
+---
+blogSearch: Live public blog query:
+- shopId=1, title=人均30💰杭州这家港式茶餐厅我疯狂打call‼️, summary=又吃到一家好吃的茶餐厅🍴环境是怀旧tvb港风📺边吃边拍照片📷几十种菜品均价都在20+💰可以是很平价了！<br>·<br>店名：九记冰厅(远洋店)<br>地址：杭州市丽水路远洋乐堤港负一楼（溜冰场旁边）<br>·<br>✔️黯然销魂饭（38💰）<br>这碗饭我吹爆！米饭上盖满了甜甜的叉烧 还有两颗溏心蛋🍳每一粒米饭都裹着浓郁的酱汁 光盘了<br>·<br>✔️铜锣湾漏奶华（28💰）<br>黄油吐司烤的脆脆的 上面洒满了可可粉🍫一刀切开 奶盖流心像瀑布一样流出来 ..., likes=2
+- shopId=1, title=假装是第一次测试, summary=11111, likes=2
+- shopId=1, title=111，冒个泡！, summary=test01, likes=1
+- shopId=1, title=111 新年快乐, summary=test02, likes=0
+","PASS","PASS","N/A","PASS","PASS","N/A","","已提示博客正文与103茶餐厅不一致，未将其作为该店体验依据。","有的，目前查到几条公开探店笔记，但需要提醒你：其中一条内容实际写的是另一家店“九记冰厅”，并非103茶餐厅；其余几条看起来是测试内容，参考价值不大。
+
+公开笔记如下：
+1. 《人均30💰杭州这家港式茶餐厅我疯狂打call‼️》——内容推荐的是“九记冰厅(远洋店)”，地址在丽水路远洋乐堤港负一楼，点赞2。
+2. 《假装是第一次测试》——内容为“11111”，点赞2。
+3. 《111，冒个泡！》——内容为“test01”，点赞1。
+
+所以目前并没有关于103茶餐厅本身的有效探店笔记。如果你需要，我可以帮你换个更具体的角度再查。"
+"CE012","context-reference","27","163","164","f1b49e977718f94bb4fbb33eb6faae11","43bf4668fe300d9311c6e0f4866f0f9c","SUCCEEDED","ANSWERED","","1","它周末营业吗？","新白鹿餐厅","shopDetail","","false","false","true","false","260","22","2342","2384","517","60","","","FAIL","FAIL","N/A","PASS","FAIL","N/A","TOOL_ROUTING","未调用shopDetail即给出营业时间；周末营业无法由现有静态信息确认。","根据资料，该店营业时间为10:30-21:00，未单独区分周末。建议按此时间前往，或提前电话确认。"
+"CE013","context-reference","28","167","168","7b1b6f37c0ea8b38af24dda1481cb649","c5fa99d8664a66d581753617076e1ca5","SUCCEEDED","ANSWERED","","1","它几点关门？","开乐迪KTV","shopDetail","shopDetail","true","true","true","true","294","46","1960","2210","849","51","","shopDetail: Live store details:
+- name=开乐迪KTV（运河上街店）, rating=3.7/5, averageSpend=67 CNY, address=台州路2号运河上街购物中心F4, openingHours=00:00-24:00
+","PASS","PASS","N/A","PASS","PASS","N/A","","","开乐迪KTV（运河上街店）是24小时营业，营业时间为00:00-24:00，所以没有关门时间。"
+"CE014","context-reference","29","171","172","8e8cbbbd890d7552dc3f16ff90e2c56e","2adeef1d477d930f140a9d43396af6f5","SUCCEEDED","ANSWERED","","1","那家店有优惠券吗？","星聚会KTV","voucherQuery","shopDetail|voucherQuery","true","true","true","true","2265","62","4435","4798","689","64","","shopDetail: Live store details:
+- name=星聚会KTV(拱墅区万达店), rating=4.7/5, averageSpend=60 CNY, address=杭行路666号万达广场C座1-2F, openingHours=10:00-22:00
+
+---
+voucherQuery: Live voucher query: no currently available voucher was found for the candidate stores.","PASS","PASS","N/A","PASS","PASS","N/A","","","目前没有查询到星聚会KTV（拱墅区万达店）可用的优惠券。建议到店前再确认一下是否有新活动。"
+"CE015","context-reference","30","175","176","69f2a131627cb24f463ed9be56084704","d1641cf8ff03108532113319bfc02f60","SUCCEEDED","ANSWERED","","1","它有公开探店笔记吗？","Mamala西餐厅","blogSearch","shopDetail|blogSearch","true","false","true","true","299","69","2990","3468","1392","103","","shopDetail: Live store details:
+- name=Mamala(杭州远洋乐堤港店), rating=4.9/5, averageSpend=290 CNY, address=丽水路66号远洋乐堤港商城2期1层B115号, openingHours=11:00-22:00
+
+---
+blogSearch: Live public blog query:
+- shopId=4, title=无尽浪漫的夜晚丨在万花丛中摇晃着红酒杯🍷品战斧牛排🥩, summary=生活就是一半烟火·一半诗意<br/>手执烟火谋生活·心怀诗意以谋爱·<br/>当然<br/> 男朋友给不了的浪漫要学会自己给🍒<br/> 无法重来的一生·尽量快乐.<br/><br/>🏰「小筑里·神秘浪漫花园餐厅」🏰<br/><br/> 💯这是一家最最最美花园的西餐厅·到处都是花餐桌上是花前台是花 美好无处不在 品一口葡萄酒，维亚红酒马瑟兰·微醺上头工作的疲惫消失无际·生如此多娇🍃<br/><br/>📍地址:延安路200号(家乐福面)<br/><br/>🚌交通:..., likes=3
+- shopId=4, title=真的是第二次测试ma?, summary=222222, likes=0
+","FAIL","FAIL","N/A","PASS","PASS","N/A","ANSWER_GENERATION","博客关联到Mamala，但主要正文描述“小筑里”；回答未提示错关联，易误导为Mamala探店笔记。","有的，目前有两条公开探店笔记：
+
+1. **《无尽浪漫的夜晚丨在万花丛中摇晃着红酒杯🍷品战斧牛排🥩》**，点赞3次。
+2. **《真的是第二次测试ma?》**，点赞0次。"
+"CE016","context-reference","31","179","180","cf5b29f6ce692da4e4721fedde1947ba","5f802c19145057d6ed0b7cd9bf0abc7b","SUCCEEDED","ANSWERED","","1","它的地址在哪里？","海底捞火锅","shopDetail","shopDetail","true","true","true","true","2935","42","4668","4818","695","50","","shopDetail: Live store details:
+- name=海底捞火锅(水晶城购物中心店）, rating=4.9/5, averageSpend=104 CNY, address=上塘路458号水晶城购物中心F6, openingHours=10:00-07:00
+","PASS","PASS","N/A","PASS","PASS","N/A","","","海底捞火锅（水晶城购物中心店）的地址是：上塘路458号水晶城购物中心F6。"
+"CE017","long-single","32","181","182","b8e206dc2de916000bf765e60aadbbe4","eb872d9ec11a272703b5094830a95874","SUCCEEDED","ANSWERED","","1","我和三位朋友周末想在运河上街附近吃饭，前面讨论的停车和路线都不用考虑。预算人均不超过100元，希望环境轻松、适合聊天，只推荐一两家真正满足条件的餐厅，并说明人均和理由；请排除KTV、健身房和足道。","新白鹿餐厅","shopDetail","shopDetail","true","true","true","true","253","55","3802","5843","1127","370","","shopDetail: Live store details:
+- name=开乐迪KTV（运河上街店）, rating=3.7/5, averageSpend=67 CNY, address=台州路2号运河上街购物中心F4, openingHours=00:00-24:00
+- name=新白鹿餐厅(运河上街店), rating=4.7/5, averageSpend=61 CNY, address=台州路2号运河上街购物中心F5, openingHours=10:30-21:00
+- name=浅草屋寿司（运河上街店）, rating=4.6/5, averageSpend=88 CNY, address=拱墅区金华路80号运河上街B1, openingHours= 11:00-21:30
+","NEEDS_REVIEW","N/A","PASS","PASS","PASS","N/A","","硬性预算、商圈和类别满足；“杭帮菜、上菜快、环境”等推荐理由未随评测结果导出检索证据，无法完成忠实度核验。","推荐这两家，都在运河上街，人均都在100元以内，适合四人轻松吃饭聊天：
+
+1. **新白鹿餐厅（运河上街店）** -人均：约61元 -评分：4.7/5 -地址：台州路2号运河上街购物中心F5 -营业时间：10:30-21:00 -理由：杭帮菜，菜品丰富、上菜快，性价比高，环境热闹但不嘈杂，很适合朋友小聚边吃边聊。
+
+2. **浅草屋寿司（运河上街店）** -人均：约88元 -评分：4.6/5 -地址：拱墅区金华路80号运河上街B1 -营业时间：11:00-21:30 -理由：日式简餐氛围轻松，寿司和小食适合四人分享，聊天起来更自在，人均也在预算内。
+
+如果你们更想吃中餐，优先选新白鹿；如果想换换口味、环境更安静一点，就选浅草屋。"
+"CE018","long-single","33","183","184","389ae46a9621a04ed1a35de715060dfc","1c0a200fcb79f14d0d49cc4c22d8a55e","SUCCEEDED","ANSWERED","","1","下班后想和同事唱歌，不需要泛泛的美食榜单。希望离运河上街不远、营业时间尽量晚、预算不要太高，请从已有店铺中推荐合适KTV，并给出地址、评分和关门时间，其他类别都不用介绍。","开乐迪KTV","shopDetail","shopDetail","true","false","true","true","408","41","2359","3049","981","154","","shopDetail: Live store details:
+- name=新白鹿餐厅(运河上街店), rating=4.7/5, averageSpend=61 CNY, address=台州路2号运河上街购物中心F5, openingHours=10:30-21:00
+- name=浅草屋寿司（运河上街店）, rating=4.6/5, averageSpend=88 CNY, address=拱墅区金华路80号运河上街B1, openingHours= 11:00-21:30
+- name=羊老三羊蝎子牛仔排北派炭火锅(运河上街店), rating=4.4/5, averageSpend=101 CNY, address=台州路2号运河上街购物中心F5, openingHours=11:00-21:30
+","FAIL","PASS","FAIL","FAIL","PASS","N/A","RETRIEVAL","已知开乐迪KTV符合类别和商圈，但检索结果未召回，最终错误拒答。","根据检索到的资料，运河上街附近目前只有美食类店铺（新白鹿餐厅、浅草屋寿司、羊老三羊蝎子火锅），**没有KTV相关信息**，因此无法推荐合适的KTV。
+
+建议你把问题改成“运河上街附近营业到24点后的KTV”或直接搜索“KTV”，重新查询。"
+"CE019","long-single","34","185","186","cfc9f81a1a1bca88054d1964701196d3","4b0d50eef9e76a40808db1993bee59fa","SUCCEEDED","NO_EVIDENCE","","1","家里人想找适合多人一起吃而且不太贵的餐厅，电影和出行话题都与这次无关。请只根据已有资料找人均不超过90元、评分尽量高、适合朋友聚餐的餐厅，说明店名、人均和评分，不要编造优惠活动。","炉鱼","shopDetail","","false","false","true","false","2845","0","2860","2888","0","80","","","FAIL","N/A","FAIL","FAIL","FAIL","N/A","RETRIEVAL","应推荐人均不超过90元的候选店铺，却返回无证据；未触发shopDetail。","当前小众点评的资料中没有找到与你问题相匹配的店铺或优惠信息。请提供更准确的店名、商圈或分类，我再帮你查询。"
+"CE020","long-single","35","187","188","cfc8540f88307956dd4fde7d6b61a0a2","dcad8e1c00eea457724b1e5887e4bde4","SUCCEEDED","CLARIFIED","","1","我只关心浅草屋寿司的公开探店笔记：是否存在、笔记主要描述哪些体验。请不要把其他餐厅博客当作它的内容，也不要因为资料不够而编造菜品、评分或优惠。","浅草屋寿司","blogSearch","","false","false","true","false","14","0","29","62","0","59","","","FAIL","N/A","N/A","FAIL","FAIL","N/A","QUERY_UNDERSTANDING","问题明确指定浅草屋寿司，仍错误进入澄清分支。","我还不能确定你指的是哪一家店，请告诉我具体店名，或说明是上一条回复中的第几家。"
+"CE021","long-single","36","189","190","36f3e89dcb92d24b1f7a8d9515585098","f8b019cf442912a45c6293c08bfd393e","SUCCEEDED","ANSWERED","","1","请根据真实店铺资料比较103茶餐厅是否适合两个人晚餐：人均是否在100元内、地址在哪里、现在是否有可用代金券。不要给我其他店铺，也请区分实时优惠信息和普通介绍。","103茶餐厅","shopDetail|voucherQuery","shopDetail|voucherQuery","true","false","true","true","284","61","7024","10713","1469","644","","shopDetail: Live store details:
+- name=103茶餐厅, rating=3.7/5, averageSpend=80 CNY, address=金华路锦昌文华苑29号, openingHours=10:00-22:00
+
+---
+voucherQuery: Live voucher query:
+- shopId=1, title=50元代金券, pay=47.50 CNY, value=50.00 CNY, rules=全场通用\n无需预约\n可无限叠加\不兑现、不找零\n仅限堂食
+- shopId=1, title=100元代金券, pay=80.00 CNY, value=100.00 CNY, rules=全场通用\n无需预约\n可无限叠加\不兑现、不找零\n仅限堂食, validUntil=2026-10-26T12:09:04
+- shopId=1, title=JMeter 10000人抢100券, pay=0.01 CNY, value=0.01 CNY, rules=压测专用, validUntil=2026-08-31T23:59:59
+- shopId=1, title=JMeter 10000人抢100券-第二轮, pay=0.01 CNY, value=0.01 CNY, rules=压测专用, validUntil=2026-08-31T23:59:59
+- shopId=1, title=JMeter 10000人抢100券-第三轮, pay=0.01 CNY, value=0.01 CNY, rules=压测专用, validUntil=2026-08-31T23:59:59
+","FAIL","FAIL","PASS","PASS","PASS","N/A","ANSWER_GENERATION","优惠券使用方案计算不成立：两张50元券或100元券加50元券均不足以覆盖约160元消费，且“约8折”不准确。","##评估结果：适合两人晚餐 ✅从预算、地址到优惠，这家店可以满足你的需求。下面区分「普通介绍」和「实时优惠」供你参考。
+
+### 📋普通介绍（基础信息）
+- **人均消费**：**80元/人** ✅（两人约160元，在人均100元以内）
+- **地址**：**金华路锦昌文华苑29号**（大关商圈）
+- **营业时间**：10:00-22:00（晚餐时段正常营业）
+- **评分**：3.7/5，评论数3035条### 🎫实时优惠（当前可用代金券）
+目前有 **2张真正常规可用**的代金券：
+
+|代金券 |售价 |面值 |有效期 |使用规则 |
+|--------|------|------|--------|----------|
+|50元代金券 |47.50元 |50元 |未标注 |全场通用、无需预约、可无限叠加、仅限堂食 |
+|100元代金券 |80元 |100元 | **2026-10-26前** |全场通用、无需预约、可无限叠加、仅限堂食 |
+
+💡 **建议**：两人晚餐约160元，使用 **两张50元代金券（实付95元）**或 **一张100元券+一张50元券**均可享约8折优惠。
+
+> ⚠️说明：知识库中出现的“JMeter10000人抢100券”系列标注为**压测专用**，属于测试数据，不是真实可用的优惠券，请忽略。
+
+---
+
+**结论**：人均达标、地址明确、有代金券可用，从这三个条件看适合两人晚餐。评分3.7中等偏上，若对口味要求较高，建议结合评论区口碑再决定。"
+"CE022","long-single","37","191","192","4f6d816c45c0f78dbc1ec1348f85f483","7cd9858bd2913e0e244120127edc5f35","SUCCEEDED","CLARIFIED","","1","这次请只查询Mamala西餐厅，重点是它的地址、营业时间和公开探店笔记；不要把西餐推荐扩大成所有餐厅，也不要使用没有证据支持的折扣或评价。","Mamala西餐厅","shopDetail|blogSearch","","false","false","true","false","14","0","27","54","0","59","","","FAIL","N/A","N/A","FAIL","FAIL","N/A","QUERY_UNDERSTANDING","问题明确指定Mamala西餐厅，仍错误进入澄清分支。","我还不能确定你指的是哪一家店，请告诉我具体店名，或说明是上一条回复中的第几家。"
+"CE023","long-single","38","193","194","360ba404465753beb714a2b06da67c4c","ac52530d9bffd13776f70dcdf35f9cb1","SUCCEEDED","ANSWERED","","1","我需要核实海底捞火锅的营业到几点、地址和人均，不关心其他火锅店；请仅使用能证明这些事实的资料回答，无法确认的部分直接说明。","海底捞火锅","shopDetail","shopDetail","true","true","true","true","320","38","6973","7870","669","187","","shopDetail: Live store details:
+- name=海底捞火锅(水晶城购物中心店）, rating=4.9/5, averageSpend=104 CNY, address=上塘路458号水晶城购物中心F6, openingHours=10:00-07:00
+","PASS","PASS","N/A","PASS","PASS","N/A","","对10:00-07:00采取保守表述，未超出店铺实时证据。","海底捞火锅(水晶城购物中心店）可确认信息如下：
+
+-营业时间：10:00-07:00（资料未明确标注是否跨天，若为跨时段则为10:00至次日07:00）
+-地址：上塘路458号水晶城购物中心F6-人均：104元以上均来自该店公开店铺资料。至于营业时间是否精确到“次日早上7点”，资料中未明确说明，无法完全确认。"
+"CE024","long-single","39","195","196","7f5680c6ab7e274891dd1b11555c2d5d","82f39dd975d8e7bfe9308eaad708525c","SUCCEEDED","ANSWERED","","1","请只回答开乐迪KTV是否适合朋友聚会：给出评分、地址、营业时间以及当前可用优惠券。不要把其他KTV的券或营业时间混入答案。","开乐迪KTV","shopDetail|voucherQuery","shopDetail|voucherQuery","true","true","true","true","3877","61","6214","6929","805","138","","shopDetail: Live store details:
+- name=开乐迪KTV（运河上街店）, rating=3.7/5, averageSpend=67 CNY, address=台州路2号运河上街购物中心F4, openingHours=00:00-24:00
+
+---
+voucherQuery: Live voucher query: no currently available voucher was found for the candidate stores.","PASS","PASS","N/A","PASS","PASS","N/A","","","开乐迪KTV（运河上街店）适合朋友聚会，全天24小时营业，时间灵活；评分3.7/5尚可。
+
+-地址：台州路2号运河上街购物中心F4-营业时间：00:00-24:00-当前可用优惠券：暂无查到可用优惠券建议直接到店或电话咨询实时活动。"
+"CE025","multi-intent","40","197","198","73f20bba86f0457abe4497edb52ea174","8b5c6fcad5b7a0e309a3546819d3f199","SUCCEEDED","ANSWERED","","1","103茶餐厅有什么优惠券和公开探店笔记？","103茶餐厅","voucherQuery|blogSearch","shopDetail|voucherQuery|blogSearch","true","true","true","true","261","87","5126","6934","1787","392","","shopDetail: Live store details:
+- name=103茶餐厅, rating=3.7/5, averageSpend=80 CNY, address=金华路锦昌文华苑29号, openingHours=10:00-22:00
+
+---
+voucherQuery: Live voucher query:
+- shopId=1, title=50元代金券, pay=47.50 CNY, value=50.00 CNY, rules=全场通用\n无需预约\n可无限叠加\不兑现、不找零\n仅限堂食
+- shopId=1, title=100元代金券, pay=80.00 CNY, value=100.00 CNY, rules=全场通用\n无需预约\n可无限叠加\不兑现、不找零\n仅限堂食, validUntil=2026-10-26T12:09:04
+- shopId=1, title=JMeter 10000人抢100券, pay=0.01 CNY, value=0.01 CNY, rules=压测专用, validUntil=2026-08-31T23:59:59
+- shopId=1, title=JMeter 10000人抢100券-第二轮, pay=0.01 CNY, value=0.01 CNY, rules=压测专用, validUntil=2026-08-31T23:59:59
+- shopId=1, title=JMeter 10000人抢100券-第三轮, pay=0.01 CNY, value=0.01 CNY, rules=压测专用, validUntil=2026-08-31T23:59:59
+
+---
+blogSearch: Live public blog query:
+- shopId=1, title=人均30💰杭州这家港式茶餐厅我疯狂打call‼️, summary=又吃到一家好吃的茶餐厅🍴环境是怀旧tvb港风📺边吃边拍照片📷几十种菜品均价都在20+💰可以是很平价了！<br>·<br>店名：九记冰厅(远洋店)<br>地址：杭州市丽水路远洋乐堤港负一楼（溜冰场旁边）<br>·<br>✔️黯然销魂饭（38💰）<br>这碗饭我吹爆！米饭上盖满了甜甜的叉烧 还有两颗溏心蛋🍳每一粒米饭都裹着浓郁的酱汁 光盘了<br>·<br>✔️铜锣湾漏奶华（28💰）<br>黄油吐司烤的脆脆的 上面洒满了可可粉🍫一刀切开 奶盖流心像瀑布一样流出来 ..., likes=2
+- shopId=1, title=假装是第一次测试, summary=11111, likes=2
+- shopId=1, title=111，冒个泡！, summary=test01, likes=1
+- shopId=1, title=111 新年快乐, summary=test02, likes=0
+","PASS","PASS","N/A","PASS","PASS","N/A","","已区分错关联博客和压测券，回答与工具结果一致。","**103茶餐厅（金华路锦昌文华苑29号，评分3.7，人均约80元）**
+
+**优惠券：**
+1. **50元代金券**：47.5元抵50元，全场通用，无需预约，可无限叠加，仅限堂食。
+2. **100元代金券**：80元抵100元，全场通用，无需预约，可无限叠加，仅限堂食，有效期至2026-10-26。
+3.另有三张标注“压测专用”的测试券，不建议作为实际优惠使用。
+
+**公开探店笔记：**
+-有一条标题为《人均30💰杭州这家港式茶餐厅我疯狂打call‼️》的笔记，但内容实际介绍的是“九记冰厅（远洋店）”，并非103茶餐厅，注意甄别。
+-另有两条内容为“11111”“test01”的测试性笔记，无参考价值。
+
+如需更准确的探店信息，建议直接询问“九记冰厅”或缩小查询范围。"
+"CE026","multi-intent","41","199","200","29c363c7ca191c45fbf490a11d27e9a0","450cd48b7a25ebe0d9ce8f10fe581af7","SUCCEEDED","ANSWERED","","1","查询新白鹿餐厅的人均和地址，同时推荐一家人均100元以内、评分较高的餐厅。","新白鹿餐厅","shopDetail","shopDetail","true","true","true","true","3975","65","9628","10660","2538","194","","shopDetail: Live store details:
+- name=新白鹿餐厅(运河上街店), rating=4.7/5, averageSpend=61 CNY, address=台州路2号运河上街购物中心F5, openingHours=10:30-21:00
+- name=103茶餐厅, rating=3.7/5, averageSpend=80 CNY, address=金华路锦昌文华苑29号, openingHours=10:00-22:00
+- name=云水谣茶餐厅, rating=4.3/5, averageSpend=98 CNY, address=桥弄街123号6层, openingHours=10:30-21:30
+","PASS","PASS","PASS","PASS","PASS","N/A","","","新白鹿餐厅(运河上街店)：人均 **61元**，地址 **台州路2号运河上街购物中心F5**，营业时间10:30-21:00，评分4.7/5。
+
+推荐一家符合“人均100元以内、评分较高”的餐厅：**云水谣茶餐厅**-人均：98元-评分：4.3/5-地址：桥弄街123号6层-营业时间：10:30-21:30如果想更便宜些，还有103茶餐厅（人均80元），但评分只有3.7/5，相对一般。"
+"CE027","multi-intent","42","201","202","61f7cbbe2abf7cddac583bd0fe4d3d0c","818afc36de26671e2c78f18692afa6b1","SUCCEEDED","ANSWERED","","1","推荐适合朋友聚餐、人均200元以内的餐厅，并同时说明炉鱼有没有公开探店笔记。","炉鱼","blogSearch","shopDetail|blogSearch","true","true","true","true","3727","62","13076","14618","1864","380","","shopDetail: Live store details:
+- name=103茶餐厅, rating=3.7/5, averageSpend=80 CNY, address=金华路锦昌文华苑29号, openingHours=10:00-22:00
+- name=炉鱼(拱墅万达广场店), rating=4.7/5, averageSpend=85 CNY, address=杭行路666号万达商业中心4幢2单元409室(铺位号4005), openingHours=00:00-24:00
+- name=新白鹿餐厅(运河上街店), rating=4.7/5, averageSpend=61 CNY, address=台州路2号运河上街购物中心F5, openingHours=10:30-21:00
+
+---
+blogSearch: Live public blog query:
+- shopId=1, title=人均30💰杭州这家港式茶餐厅我疯狂打call‼️, summary=又吃到一家好吃的茶餐厅🍴环境是怀旧tvb港风📺边吃边拍照片📷几十种菜品均价都在20+💰可以是很平价了！<br>·<br>店名：九记冰厅(远洋店)<br>地址：杭州市丽水路远洋乐堤港负一楼（溜冰场旁边）<br>·<br>✔️黯然销魂饭（38💰）<br>这碗饭我吹爆！米饭上盖满了甜甜的叉烧 还有两颗溏心蛋🍳每一粒米饭都裹着浓郁的酱汁 光盘了<br>·<br>✔️铜锣湾漏奶华（28💰）<br>黄油吐司烤的脆脆的 上面洒满了可可粉🍫一刀切开 奶盖流心像瀑布一样流出来 ..., likes=2
+- shopId=1, title=假装是第一次测试, summary=11111, likes=2
+- shopId=1, title=111，冒个泡！, summary=test01, likes=1
+- shopId=1, title=111 新年快乐, summary=test02, likes=0
+","FAIL","FAIL","PASS","PASS","FAIL","N/A","TOOL_ROUTING","未调用voucherQuery，却在推荐中声明103茶餐厅存在当前优惠券；实时事实缺少工具验证。","推荐3家适合朋友聚餐、人均200元以内的餐厅：
+
+1. **炉鱼(拱墅万达广场店)**-美食/烤鱼，评分4.7，人均85元-地址：杭行路666号万达商业中心4幢2单元409室(铺位号4005)-营业时间：00:00-24:002. **新白鹿餐厅(运河上街店)**-美食/杭帮菜，评分4.7，人均61元-地址：台州路2号运河上街购物中心F5-营业时间：10:30-21:003. **103茶餐厅**-美食/港式茶餐厅，评分3.7，人均80元-地址：金华路锦昌文华苑29号-营业时间：10:00-22:00-有50元/100元代金券，全场通用，需堂食关于**炉鱼**的公开探店笔记：目前没有找到炉鱼(拱墅万达广场店)的公开探店笔记。现有公开笔记只关联到103茶餐厅，且其中提到的“九记冰厅(远洋店)”是另一家店，注意别混淆。"
+"CE028","multi-intent","43","203","204","440a861ce482de53e2a2dc48a0ae1798","2ae8c0867dfa4aaaac873fddc7ef4357","SUCCEEDED","ANSWERED","","1","请比较103茶餐厅和浅草屋寿司的人均与评分，并查询两家现在是否有优惠券。","103茶餐厅|浅草屋寿司","shopDetail|voucherQuery","shopDetail|voucherQuery","true","true","true","true","324","61","6908","7868","1554","219","","shopDetail: Live store details:
+- name=103茶餐厅, rating=3.7/5, averageSpend=80 CNY, address=金华路锦昌文华苑29号, openingHours=10:00-22:00
+- name=浅草屋寿司（运河上街店）, rating=4.6/5, averageSpend=88 CNY, address=拱墅区金华路80号运河上街B1, openingHours= 11:00-21:30
+
+---
+voucherQuery: Live voucher query:
+- shopId=1, title=50元代金券, pay=47.50 CNY, value=50.00 CNY, rules=全场通用\n无需预约\n可无限叠加\不兑现、不找零\n仅限堂食
+- shopId=1, title=100元代金券, pay=80.00 CNY, value=100.00 CNY, rules=全场通用\n无需预约\n可无限叠加\不兑现、不找零\n仅限堂食, validUntil=2026-10-26T12:09:04
+- shopId=1, title=JMeter 10000人抢100券, pay=0.01 CNY, value=0.01 CNY, rules=压测专用, validUntil=2026-08-31T23:59:59
+- shopId=1, title=JMeter 10000人抢100券-第二轮, pay=0.01 CNY, value=0.01 CNY, rules=压测专用, validUntil=2026-08-31T23:59:59
+- shopId=1, title=JMeter 10000人抢100券-第三轮, pay=0.01 CNY, value=0.01 CNY, rules=压测专用, validUntil=2026-08-31T23:59:59
+","PASS","PASS","PASS","PASS","PASS","N/A","","","比较如下：
+
+- **103茶餐厅**：人均 **80元**，评分 **3.7/5**。目前有代金券：50元代金券（47.5元抵50元）、100元代金券（80元抵100元，有效期至2026-10-26）。规则均为全场通用、无需预约、可无限叠加、仅限堂食。
+- **浅草屋寿司（运河上街店）**：人均 **88元**，评分 **4.6/5**。目前未查到优惠券信息。
+
+简单说：浅草屋评分更高，人均略贵；103茶餐厅有代金券可优惠。"
+"CE029","multi-intent","44","205","206","51099ce9e69a1796530c32f73437c7e4","9ad09f302d9b20b98343018fcb480aa6","SUCCEEDED","ANSWERED","","1","推荐一家运河上街附近、适合唱歌的KTV，并查询星聚会KTV的地址和营业时间。","星聚会KTV","shopDetail","shopDetail","true","true","true","true","392","49","7190","8159","580","175","","shopDetail: Live store details:
+- name=星聚会KTV(拱墅区万达店), rating=4.7/5, averageSpend=60 CNY, address=杭行路666号万达广场C座1-2F, openingHours=10:00-22:00
+","PASS","PASS","PASS","PASS","PASS","N/A","","对“是否近运河上街”明确保留不确定性，未把未验证事实当作结论。","推荐：**星聚会KTV（拱墅区万达店）**-类型：KTV-评分：4.7/5-人均：60元-地址：杭行路666号万达广场C座1-2F-营业时间：10:00-22:00不过，目前资料未标明这家店是否就在“运河上街”附近，建议先确认位置是否方便。若需要更贴近运河上街的KTV，可以补充具体范围，我再帮你进一步查。"
+"CE030","multi-intent","45","207","208","9e6219fc2aa8c4d1acfbe1537f6da1fc","176203ed9f62c5886343361be431a5f3","SUCCEEDED","ANSWERED","","1","Mamala西餐厅的地址和营业时间是什么？另外，推荐一家适合情侣约会的西餐厅。","Mamala西餐厅","shopDetail","shopDetail","true","false","true","true","3302","52","14011","15653","1788","209","","shopDetail: Live store details:
+- name=Mamala(杭州远洋乐堤港店), rating=4.9/5, averageSpend=290 CNY, address=丽水路66号远洋乐堤港商城2期1层B115号, openingHours=11:00-22:00
+- name=103茶餐厅, rating=3.7/5, averageSpend=80 CNY, address=金华路锦昌文华苑29号, openingHours=10:00-22:00
+- name=新白鹿餐厅(运河上街店), rating=4.7/5, averageSpend=61 CNY, address=台州路2号运河上街购物中心F5, openingHours=10:30-21:00
+","FAIL","FAIL","N/A","PASS","PASS","N/A","ANSWER_GENERATION","将关于“小筑里”的博客描述作为Mamala的约会氛围依据，存在店铺事实错配。","Mamala(杭州远洋乐堤港店)地址：丽水路66号远洋乐堤港商城2期1层B115号营业时间：11:00-22:00适合情侣约会的西餐厅，目前资料里我推荐 **Mamala(杭州远洋乐堤港店)**：评分4.9/5，人均约290元。用户评价里有“万花丛中摇晃红酒杯”“品战斧牛排”等浪漫氛围描述，比较适合约会。
+
+另外两家（103茶餐厅、新白鹿餐厅）不是西餐，暂不推荐。"
+"CE031","multi-intent","46","209","210","d121f00dcf5bd06d8d60fe6bbb40f02d","ad9793b29740f8da3ced237779f8e05f","SUCCEEDED","CLARIFIED","","1","炉鱼的人均和地址是什么？同时查询它现在是否有优惠券。","炉鱼","shopDetail|voucherQuery","","false","false","true","false","22","0","38","73","0","59","","","FAIL","N/A","N/A","FAIL","FAIL","N/A","QUERY_UNDERSTANDING","同一句已明确“炉鱼”，后续“它”仍被当作歧义。","我还不能确定你指的是哪一家店，请告诉我具体店名，或说明是上一条回复中的第几家。"
+"CE032","multi-intent","47","211","212","3e53b37743fed9ab412f5a7502c27c89","488a4149adc2a47da4f29fab4413cba5","SUCCEEDED","ANSWERED","","1","请告诉我海底捞火锅几点关门，并查看是否有公开探店笔记。","海底捞火锅","shopDetail|blogSearch","shopDetail|blogSearch","true","true","true","true","480","72","3013","3636","658","135","","shopDetail: Live store details:
+- name=海底捞火锅(水晶城购物中心店）, rating=4.9/5, averageSpend=104 CNY, address=上塘路458号水晶城购物中心F6, openingHours=10:00-07:00
+
+---
+blogSearch: Live public blog query:
+- shopId=5, title=希望是最后一次测试吧！！！, summary=33333, likes=0
+","PASS","PASS","N/A","PASS","PASS","N/A","","","海底捞火锅（水晶城购物中心店）的营业时间是 **10:00至次日07:00**，也就是说它通宵营业，关门时间为次日早上 **7点**。
+
+公开探店笔记查到 **1条**：
+-标题：**希望是最后一次测试吧！！！**
+-内容摘要：**33333**
+-点赞数：**0**"
+"CE033","clarify","48","213","214","752fe1ccbbb3f194a93565d3fba34770","cce69ad08d566c5c9b3473cb3a93c050","SUCCEEDED","CLARIFIED","","1","它现在有什么优惠？","","","","true","true","true","true","20","0","37","71","0","59","","","PASS","N/A","N/A","PASS","N/A","PASS","","","我还不能确定你指的是哪一家店，请告诉我具体店名，或说明是上一条回复中的第几家。"
+"CE034","clarify","49","215","216","25794cb2ecfac87da6837b8b9f8e1a33","e7104deaa8b5d85d5e95a6cbcc7accc4","SUCCEEDED","CLARIFIED","","1","第二家地址在哪里？","","","","true","true","true","true","19","0","34","68","0","59","","","PASS","N/A","N/A","PASS","N/A","PASS","","","我还不能确定你指的是哪一家店，请告诉我具体店名，或说明是上一条回复中的第几家。"
+"CE035","clarify","50","217","218","a371e4122af83be5dc28a08d385f6c5c","b9d94de7602c5f8037cdc916d4ffc728","SUCCEEDED","CLARIFIED","","1","换一家评分更高的。","","","","true","true","true","true","23","0","45","82","0","59","","","PASS","N/A","N/A","PASS","N/A","PASS","","","我还不能确定你指的是哪一家店，请告诉我具体店名，或说明是上一条回复中的第几家。"
+"CE036","clarify","51","219","220","fb4f8752fc9678a0ebe1fce1c69b28a4","855257561913b3171c9a3d262f7bed74","SUCCEEDED","CLARIFIED","","1","那里的探店笔记多吗？","","","","true","true","true","true","19","0","36","61","0","59","","","PASS","N/A","N/A","PASS","N/A","PASS","","","我还不能确定你指的是哪一家店，请告诉我具体店名，或说明是上一条回复中的第几家。"
+"CE037","inherited-constraint","52","223","224","2d638f31e16b817e1031bf04375d061a","a0c8b7f4f4777aa02796aed55015e06c","SUCCEEDED","ANSWERED","","1","如果两个人去，人均不超过100元时它合适吗？现在有优惠券吗？","103茶餐厅","voucherQuery","shopDetail|voucherQuery","true","true","true","true","252","69","1889","2521","1557","130","","shopDetail: Live store details:
+- name=103茶餐厅, rating=3.7/5, averageSpend=80 CNY, address=金华路锦昌文华苑29号, openingHours=10:00-22:00
+
+---
+voucherQuery: Live voucher query:
+- shopId=1, title=50元代金券, pay=47.50 CNY, value=50.00 CNY, rules=全场通用\n无需预约\n可无限叠加\不兑现、不找零\n仅限堂食
+- shopId=1, title=100元代金券, pay=80.00 CNY, value=100.00 CNY, rules=全场通用\n无需预约\n可无限叠加\不兑现、不找零\n仅限堂食, validUntil=2026-10-26T12:09:04
+- shopId=1, title=JMeter 10000人抢100券, pay=0.01 CNY, value=0.01 CNY, rules=压测专用, validUntil=2026-08-31T23:59:59
+- shopId=1, title=JMeter 10000人抢100券-第二轮, pay=0.01 CNY, value=0.01 CNY, rules=压测专用, validUntil=2026-08-31T23:59:59
+- shopId=1, title=JMeter 10000人抢100券-第三轮, pay=0.01 CNY, value=0.01 CNY, rules=压测专用, validUntil=2026-08-31T23:59:59
+","PASS","PASS","PASS","PASS","PASS","N/A","","","合适。103茶餐厅人均约80元，两个人花费约160元，人均低于100元。
+
+目前有优惠券：
+-50元代金券：47.50元抵50元-100元代金券：80元抵100元（有效期至2026-10-26）
+以上均为全场通用、无需预约、可无限叠加，仅限堂食。"
+"CE038","inherited-constraint","53","227","228","b05c0f65ff8f4afdbb31f1f5eb0c0355","ceb705115a98109e22cfd0257a53374c","SUCCEEDED","CLARIFIED","","1","如果三个人晚餐且预算每人不超过120元，它合适吗？地址在哪里？","炉鱼","shopDetail","","false","false","true","false","2706","0","2729","2764","0","59","","","FAIL","N/A","N/A","FAIL","FAIL","N/A","QUERY_UNDERSTANDING","测试上下文已唯一指向炉鱼，却未解析“它”，直接澄清。","我还不能确定你指的是哪一家店，请告诉我具体店名，或说明是上一条回复中的第几家。"
+"CE039","inherited-constraint","54","231","232","9ce4e87a1ce4f10f830bd8e3980aec67","f6675c7fedaa76a5aad66792adadaf2d","SUCCEEDED","ANSWERED","","1","如果下班后去唱歌，它离运河上街近吗？什么时候关门？","开乐迪KTV","shopDetail","shopDetail","true","true","true","true","253","49","2924","3328","876","94","","shopDetail: Live store details:
+- name=开乐迪KTV（运河上街店）, rating=3.7/5, averageSpend=67 CNY, address=台州路2号运河上街购物中心F4, openingHours=00:00-24:00
+","PASS","PASS","PASS","PASS","PASS","N/A","","","开乐迪KTV（运河上街店）就在运河上街购物中心内（台州路2号F4），不需要另外找位置。
+
+营业时间：00:00-24:00，全天不关门，下班后去完全没问题。"
+"CE040","inherited-constraint","55","235","236","b460908c4b0cc89a6f87718106df1c0a","e125e2de596ae1b3ffb9bb7a4152bbd2","SUCCEEDED","ANSWERED","","1","两个人聚餐、预算每人150元时它合适吗？有没有公开探店笔记？","浅草屋寿司","blogSearch","shopDetail|blogSearch","true","true","true","true","254","72","2054","2470","714","91","","shopDetail: Live store details:
+- name=浅草屋寿司（运河上街店）, rating=4.6/5, averageSpend=88 CNY, address=拱墅区金华路80号运河上街B1, openingHours= 11:00-21:30
+
+---
+blogSearch: Live blog query: no public blog was found for the candidate stores.","PASS","PASS","PASS","PASS","PASS","N/A","","","合适。浅草屋寿司（运河上街店）人均88元，低于你们每人150元的预算，两人总花费约176元，预算充足。
+
+目前没有查到该店的公开探店笔记。"

@@ -1,0 +1,41 @@
+id,split,scenario,turns_json,expected_shop_names,required_tools,notes
+CE001,HOLDOUT,direct,"[""103茶餐厅现在有什么优惠券？""]",103茶餐厅,voucherQuery,short direct voucher query
+CE002,HOLDOUT,direct,"[""新白鹿餐厅营业到几点？""]",新白鹿餐厅,shopDetail,short direct opening-hours query
+CE003,HOLDOUT,direct,"[""炉鱼的人均和地址分别是什么？""]",炉鱼,shopDetail,short direct store-detail query
+CE004,HOLDOUT,direct,"[""浅草屋寿司有公开探店笔记吗？""]",浅草屋寿司,blogSearch,short direct public-blog query
+CE005,HOLDOUT,direct,"[""开乐迪KTV的评分和地址是什么？""]",开乐迪KTV,shopDetail,short direct KTV detail query
+CE006,HOLDOUT,direct,"[""海底捞火锅几点关门？""]",海底捞火锅,shopDetail,opening-hours synonym
+CE007,HOLDOUT,direct,"[""Mamala西餐厅有什么特色？""]",Mamala西餐厅,,short semantic store query
+CE008,HOLDOUT,direct,"[""星聚会KTV是否有优惠券？""]",星聚会KTV,voucherQuery,short direct voucher query
+CE009,HOLDOUT,context-reference,"[""请只介绍炉鱼这一家店，并给出营业时间。"",""它开到几点？""]",炉鱼,shopDetail,real prior Agent answer is the context source
+CE010,HOLDOUT,context-reference,"[""请只介绍浅草屋寿司这一家店，并说明评分。"",""它有什么优惠？""]",浅草屋寿司,voucherQuery,real prior Agent answer is the context source
+CE011,HOLDOUT,context-reference,"[""请只介绍103茶餐厅这一家店，并给出人均。"",""那里有公开探店笔记吗？""]",103茶餐厅,blogSearch,place pronoun after real assistant output
+CE012,HOLDOUT,context-reference,"[""请只介绍新白鹿餐厅这一家店，并给出地址。"",""它周末营业吗？""]",新白鹿餐厅,shopDetail,single-entity reference
+CE013,HOLDOUT,context-reference,"[""请只介绍开乐迪KTV这一家店，并给出评分。"",""它几点关门？""]",开乐迪KTV,shopDetail,single-entity reference
+CE014,HOLDOUT,context-reference,"[""请只介绍星聚会KTV这一家店，并给出地址。"",""那家店有优惠券吗？""]",星聚会KTV,voucherQuery,single-entity reference
+CE015,HOLDOUT,context-reference,"[""请只介绍Mamala西餐厅这一家店，并给出营业时间。"",""它有公开探店笔记吗？""]",Mamala西餐厅,blogSearch,single-entity reference
+CE016,HOLDOUT,context-reference,"[""请只介绍海底捞火锅这一家店，并给出人均。"",""它的地址在哪里？""]",海底捞火锅,shopDetail,single-entity reference
+CE017,HOLDOUT,long-single,"[""我和三位朋友周末想在运河上街附近吃饭，前面讨论的停车和路线都不用考虑。预算人均不超过100元，希望环境轻松、适合聊天，只推荐一两家真正满足条件的餐厅，并说明人均和理由；请排除KTV、健身房和足道。""]",新白鹿餐厅,shopDetail,long noisy recommendation
+CE018,HOLDOUT,long-single,"[""下班后想和同事唱歌，不需要泛泛的美食榜单。希望离运河上街不远、营业时间尽量晚、预算不要太高，请从已有店铺中推荐合适KTV，并给出地址、评分和关门时间，其他类别都不用介绍。""]",开乐迪KTV,shopDetail,long noisy KTV recommendation
+CE019,HOLDOUT,long-single,"[""家里人想找适合多人一起吃而且不太贵的餐厅，电影和出行话题都与这次无关。请只根据已有资料找人均不超过90元、评分尽量高、适合朋友聚餐的餐厅，说明店名、人均和评分，不要编造优惠活动。""]",炉鱼,shopDetail,long noisy restaurant recommendation
+CE020,HOLDOUT,long-single,"[""我只关心浅草屋寿司的公开探店笔记：是否存在、笔记主要描述哪些体验。请不要把其他餐厅博客当作它的内容，也不要因为资料不够而编造菜品、评分或优惠。""]",浅草屋寿司,blogSearch,long noisy blog query
+CE021,HOLDOUT,long-single,"[""请根据真实店铺资料比较103茶餐厅是否适合两个人晚餐：人均是否在100元内、地址在哪里、现在是否有可用代金券。不要给我其他店铺，也请区分实时优惠信息和普通介绍。""]",103茶餐厅,shopDetail|voucherQuery,long single store with live data
+CE022,HOLDOUT,long-single,"[""这次请只查询Mamala西餐厅，重点是它的地址、营业时间和公开探店笔记；不要把西餐推荐扩大成所有餐厅，也不要使用没有证据支持的折扣或评价。""]",Mamala西餐厅,shopDetail|blogSearch,long constrained store query
+CE023,HOLDOUT,long-single,"[""我需要核实海底捞火锅的营业到几点、地址和人均，不关心其他火锅店；请仅使用能证明这些事实的资料回答，无法确认的部分直接说明。""]",海底捞火锅,shopDetail,long constrained detail query
+CE024,HOLDOUT,long-single,"[""请只回答开乐迪KTV是否适合朋友聚会：给出评分、地址、营业时间以及当前可用优惠券。不要把其他KTV的券或营业时间混入答案。""]",开乐迪KTV,shopDetail|voucherQuery,long constrained KTV query
+CE025,HOLDOUT,multi-intent,"[""103茶餐厅有什么优惠券和公开探店笔记？""]",103茶餐厅,voucherQuery|blogSearch,one store multiple real-time sources
+CE026,HOLDOUT,multi-intent,"[""查询新白鹿餐厅的人均和地址，同时推荐一家人均100元以内、评分较高的餐厅。""]",新白鹿餐厅,shopDetail,detail plus recommendation
+CE027,HOLDOUT,multi-intent,"[""推荐适合朋友聚餐、人均200元以内的餐厅，并同时说明炉鱼有没有公开探店笔记。""]",炉鱼,blogSearch,recommendation plus blog query
+CE028,HOLDOUT,multi-intent,"[""请比较103茶餐厅和浅草屋寿司的人均与评分，并查询两家现在是否有优惠券。""]",103茶餐厅|浅草屋寿司,shopDetail|voucherQuery,two stores multiple tools
+CE029,HOLDOUT,multi-intent,"[""推荐一家运河上街附近、适合唱歌的KTV，并查询星聚会KTV的地址和营业时间。""]",星聚会KTV,shopDetail,recommendation plus detail query
+CE030,HOLDOUT,multi-intent,"[""Mamala西餐厅的地址和营业时间是什么？另外，推荐一家适合情侣约会的西餐厅。""]",Mamala西餐厅,shopDetail,detail plus semantic recommendation
+CE031,HOLDOUT,multi-intent,"[""炉鱼的人均和地址是什么？同时查询它现在是否有优惠券。""]",炉鱼,shopDetail|voucherQuery,detail plus voucher query
+CE032,HOLDOUT,multi-intent,"[""请告诉我海底捞火锅几点关门，并查看是否有公开探店笔记。""]",海底捞火锅,shopDetail|blogSearch,opening-hours plus blog query
+CE033,HOLDOUT,clarify,"[""它现在有什么优惠？""]",,,no context must be clarified without retrieval tools
+CE034,HOLDOUT,clarify,"[""第二家地址在哪里？""]",,,no preceding list must be clarified
+CE035,HOLDOUT,clarify,"[""换一家评分更高的。""]",,,no unique previous candidate must be clarified
+CE036,HOLDOUT,clarify,"[""那里的探店笔记多吗？""]",,,no place context must be clarified
+CE037,HOLDOUT,inherited-constraint,"[""请只介绍103茶餐厅这一家店，并说明人均和地址。"",""如果两个人去，人均不超过100元时它合适吗？现在有优惠券吗？""]",103茶餐厅,voucherQuery,real context plus inherited budget condition
+CE038,HOLDOUT,inherited-constraint,"[""请只介绍炉鱼这一家店，并说明评分和人均。"",""如果三个人晚餐且预算每人不超过120元，它合适吗？地址在哪里？""]",炉鱼,shopDetail,real context plus inherited budget condition
+CE039,HOLDOUT,inherited-constraint,"[""请只介绍开乐迪KTV这一家店，并说明评分和营业时间。"",""如果下班后去唱歌，它离运河上街近吗？什么时候关门？""]",开乐迪KTV,shopDetail,real context plus inherited area condition
+CE040,HOLDOUT,inherited-constraint,"[""请只介绍浅草屋寿司这一家店，并说明评分和人均。"",""两个人聚餐、预算每人150元时它合适吗？有没有公开探店笔记？""]",浅草屋寿司,blogSearch,real context plus inherited budget condition

@@ -1,0 +1,13 @@
+# One-shot knowledge rebuild profile.
+# Start with: --spring.profiles.active=local,knowledge-rebuild
+spring:
+  config:
+    activate:
+      on-profile: knowledge-rebuild
+
+ai:
+  knowledge:
+    rebuild-on-start: true
+  evaluation:
+    enabled: false
+    conversation-enabled: false

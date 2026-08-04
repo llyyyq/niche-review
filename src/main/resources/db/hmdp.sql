@@ -1327,8 +1327,8 @@ SET FOREIGN_KEY_CHECKS = 1;
 DROP TABLE IF EXISTS `tb_ai_tool_log`;
 CREATE TABLE `tb_ai_tool_log` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'primary key',
-  `conversation_id` bigint unsigned NOT NULL COMMENT 'conversation id',
-  `user_id` bigint unsigned NOT NULL COMMENT 'conversation owner',
+  `conversation_id` bigint unsigned DEFAULT NULL COMMENT 'conversation id; NULL for offline evaluation',
+  `user_id` bigint unsigned DEFAULT NULL COMMENT 'conversation owner; NULL for offline evaluation',
   `assistant_message_id` bigint unsigned DEFAULT NULL COMMENT 'assistant message id',
   `request_id` varchar(32) DEFAULT NULL COMMENT 'HTTP/SSE request correlation id',
   `trace_id` char(32) DEFAULT NULL COMMENT 'logical AI trace id',
