@@ -47,10 +47,15 @@ public class AiTraceServiceImpl extends ServiceImpl<AiTraceMapper, AiTrace>
             Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
                     "originalChars", "rewrittenChars", "mode", "queryCount",
                     "modelCalled", "validModelOutput", "vectorCount",
-                    "keywordFallbackEnabled", "resultCount", "degradedToKeyword",
+                    "resultCount", "semanticRequested", "semanticDegraded", "candidateLimit",
                     "shopIds", "groupCount", "reason", "provider", "model",
                     "inputTokens", "outputTokens", "toolCount", "finished",
-                    "toolName", "toolCallId", "resultChars", "event"
+                    "toolName", "toolCallId", "resultChars", "event", "attempts",
+                    "structuredPlan", "taskCount", "resolvedShopCount", "filterApplied",
+                    "vectorMinScore", "vectorResultCount", "hardConstraintCount", "taskIndex",
+                    "profileResultCount", "blogResultCount", "candidateShopCount",
+                    "taskIntents", "taskShopNames", "taskCategories", "taskAreas",
+                    "taskBudgets", "taskRequiredFacts", "semanticTaskCount", "skippedToolCount"
             )));
 
     @Resource
@@ -307,6 +312,16 @@ public class AiTraceServiceImpl extends ServiceImpl<AiTraceMapper, AiTrace>
             Object value = entry.getValue();
             if (value instanceof Number || value instanceof Boolean) {
                 safe.put(entry.getKey(), value);
+            } else if ("shopIds".equals(entry.getKey()) && value instanceof Iterable) {
+                // Candidate shop IDs are safe trace metadata. Preserve the collection as JSON
+                // so downstream evaluation can recover the ordered TopK candidates exactly.
+                List<Long> shopIds = new ArrayList<>();
+                for (Object item : (Iterable<?>) value) {
+                    if (item instanceof Number) {
+                        shopIds.add(((Number) item).longValue());
+                    }
+                }
+                safe.put(entry.getKey(), shopIds);
             } else {
                 String text = String.valueOf(value);
                 safe.put(entry.getKey(), text.length() <= 256 ? text : text.substring(0, 256));

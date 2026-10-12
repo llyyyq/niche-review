@@ -18,5 +18,5 @@ public interface VoucherMapper extends BaseMapper<Voucher> {
 
     List<Voucher> queryVoucherOfShop(@Param("shopId") Long shopId);
 
-    List<Voucher> queryEnabledVouchers();
+    List<Voucher> queryEnabledVouchersByShopIds(@Param("shopIds") List<Long> shopIds);
 }

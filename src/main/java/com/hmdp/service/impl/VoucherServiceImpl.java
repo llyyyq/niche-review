@@ -45,8 +45,8 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     }
 
     @Override
-    public List<Voucher> listEnabledVouchersForKnowledge() {
-        return getBaseMapper().queryEnabledVouchers();
+    public List<Voucher> listEnabledVouchersForKnowledge(List<Long> shopIds) {
+        return getBaseMapper().queryEnabledVouchersByShopIds(shopIds);
     }
 
     @Override

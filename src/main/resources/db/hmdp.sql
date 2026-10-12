@@ -1269,18 +1269,42 @@ CREATE TABLE `tb_voucher_order`  (
   `voucher_id` bigint(20) UNSIGNED NOT NULL COMMENT '购买的代金券id',
   `pay_type` tinyint(1) UNSIGNED NOT NULL DEFAULT 1 COMMENT '支付方式 1：余额支付；2：支付宝；3：微信',
   `status` tinyint(1) UNSIGNED NOT NULL DEFAULT 1 COMMENT '订单状态，1：未支付；2：已支付；3：已核销；4：已取消；5：退款中；6：已退款',
+  `redis_stock_released` tinyint(1) UNSIGNED NOT NULL DEFAULT 0 COMMENT '取消订单的Redis库存是否已归还',
   `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '下单时间',
   `pay_time` timestamp NULL DEFAULT NULL COMMENT '支付时间',
   `use_time` timestamp NULL DEFAULT NULL COMMENT '核销时间',
   `refund_time` timestamp NULL DEFAULT NULL COMMENT '退款时间',
   `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`) USING BTREE,
-  UNIQUE KEY `uk_user_voucher` (`user_id`, `voucher_id`) USING BTREE
+  UNIQUE KEY `uk_user_voucher` (`user_id`, `voucher_id`) USING BTREE,
+  KEY `idx_voucher_order_redis_release` (`status`, `redis_stock_released`, `update_time`) USING BTREE
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = Compact;
 
 -- ----------------------------
 -- Records of tb_voucher_order
 -- ----------------------------
+
+-- ----------------------------
+-- Table structure for tb_voucher_order_dispatch_task
+-- ----------------------------
+DROP TABLE IF EXISTS `tb_voucher_order_dispatch_task`;
+CREATE TABLE `tb_voucher_order_dispatch_task` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'primary key',
+  `order_id` bigint unsigned NOT NULL COMMENT 'voucher order id',
+  `user_id` bigint unsigned NOT NULL COMMENT 'buyer id',
+  `voucher_id` bigint unsigned NOT NULL COMMENT 'voucher id',
+  `status` tinyint unsigned NOT NULL DEFAULT 0 COMMENT '0 pending, 1 processing, 2 sent, 3 completed, 4 cancelled',
+  `retry_count` int unsigned NOT NULL DEFAULT 0 COMMENT 'delivery attempts',
+  `next_retry_at` datetime NOT NULL COMMENT 'next delivery attempt',
+  `processing_at` datetime DEFAULT NULL COMMENT 'claim time for timeout recovery',
+  `last_error` varchar(512) DEFAULT NULL COMMENT 'last delivery error',
+  `version` bigint unsigned NOT NULL DEFAULT 0 COMMENT 'optimistic lock version',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'create time',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'update time',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_voucher_order_dispatch_order_id` (`order_id`),
+  KEY `idx_voucher_order_dispatch_due` (`status`, `next_retry_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Reliable voucher-order RocketMQ dispatch outbox';
 
 -- ----------------------------
 -- Table structure for tb_ai_conversation

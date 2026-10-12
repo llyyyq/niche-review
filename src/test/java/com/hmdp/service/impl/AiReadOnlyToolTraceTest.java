@@ -3,8 +3,11 @@ package com.hmdp.service.impl;
 import com.hmdp.ai.AiTraceContext;
 import com.hmdp.ai.AiTraceSpanScope;
 import com.hmdp.ai.AiToolExecution;
+import com.hmdp.ai.AiToolQueryScope;
 import com.hmdp.ai.ShopKnowledge;
+import com.hmdp.config.AiKnowledgeProperties;
 import com.hmdp.entity.AiToolLog;
+import com.hmdp.entity.Shop;
 import com.hmdp.service.IAiToolLogService;
 import com.hmdp.service.IAiTraceService;
 import com.hmdp.service.IBlogService;
@@ -18,9 +21,11 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.Collections;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -59,6 +64,7 @@ class AiReadOnlyToolTraceTest {
         ReflectionTestUtils.setField(service, "blogService", blogService);
         ReflectionTestUtils.setField(service, "aiToolLogService", toolLogService);
         ReflectionTestUtils.setField(service, "aiTraceService", traceService);
+        ReflectionTestUtils.setField(service, "knowledgeProperties", new AiKnowledgeProperties());
     }
 
     @Test
@@ -94,10 +100,12 @@ class AiReadOnlyToolTraceTest {
                 Collections.singletonList("shopDetail"),
                 null,
                 null,
+                emptyScope(),
                 Collections.singletonList(knowledge)
         );
 
-        assertTrue(executions.isEmpty());
+        assertTrue(executions.size() == 1);
+        assertTrue(!executions.get(0).isSuccessful());
         verify(traceService).completeSpan(
                 argThat(context -> "2222222222222222".equals(context.getCurrentSpanId())),
                 eq(false),
@@ -115,10 +123,73 @@ class AiReadOnlyToolTraceTest {
     }
 
     @Test
-    void openingHoursSynonymsShouldUseDirectShopDetailRouting() {
-        assertTrue(service.shouldUseDirectToolRouting("\u6d77\u5e95\u635e\u706b\u9505\u8425\u4e1a\u5230\u51e0\u70b9\uff1f", null, null));
-        assertTrue(service.shouldUseDirectToolRouting("\u5f00\u4e50\u8feaKTV\u51e0\u70b9\u5173\u95e8\uff1f", null, null));
-        assertTrue(service.shouldUseDirectToolRouting("INLOVE KTV\u5f00\u5230\u51e0\u70b9\uff1f", null, null));
-        assertTrue(service.shouldUseDirectToolRouting("\u661f\u805a\u4f1aKTV\u4ec0\u4e48\u65f6\u5019\u6253\u70ca\uff1f", null, null));
+    void resolvedShopIdsShouldNotBeExpandedBySemanticCandidates() {
+        when(shopService.listByIds(anyList())).thenReturn(Collections.emptyList());
+        ShopKnowledge unrelatedCandidate = new ShopKnowledge(
+                99L, "unrelated", 0.9D, Collections.<String, Object>emptyMap());
+
+        service.executeTools(null, 10L, 20L,
+                Collections.singletonList("shopDetail"), null, null,
+                new AiToolQueryScope(Collections.singletonList(7L), Collections.<Long>emptyList(),
+                        Collections.<Long>emptyList(), Collections.<String>emptyList(), null),
+                Collections.singletonList(unrelatedCandidate));
+
+        verify(shopService).listByIds(argThat(ids -> ids.equals(Collections.singletonList(7L))));
+    }
+
+    @Test
+    void liveToolMustRespectResolvedBudgetBeforeQueryingStoreDetails() {
+        Shop expensiveShop = new Shop()
+                .setId(7L)
+                .setName("炉鱼（拱墅万达广场店）")
+                .setTypeId(1L)
+                .setArea("北部新城")
+                .setAvgPrice(200L);
+        when(shopService.listByIds(anyList())).thenReturn(Collections.singletonList(expensiveShop));
+
+        List<AiToolExecution> executions = service.executeTools(
+                null, 10L, 20L, Collections.singletonList("shopDetail"), null, null,
+                new AiToolQueryScope(Collections.singletonList(7L), Collections.<Long>emptyList(),
+                        Collections.singletonList(1L), Collections.singletonList("北部新城"), 100),
+                Collections.<ShopKnowledge>emptyList());
+
+        assertEquals(1, executions.size());
+        assertTrue(executions.get(0).isSkipped());
+        assertEquals("shopDetail", executions.get(0).getToolName());
+        verify(shopService).listByIds(argThat(ids -> ids.equals(Collections.singletonList(7L))));
+    }
+
+    @Test
+    void toolCandidateSelectionShouldStopAtConfiguredLimit() {
+        List<ShopKnowledge> candidates = Arrays.asList(
+                knowledge(1L), knowledge(2L), knowledge(3L),
+                knowledge(4L), knowledge(5L), knowledge(6L));
+        when(shopService.listByIds(anyList())).thenReturn(Collections.<Shop>emptyList());
+
+        service.executeTools(null, 10L, 20L,
+                Collections.singletonList("shopDetail"), null, null, emptyScope(), candidates);
+
+        verify(shopService).listByIds(argThat(ids -> ids.size() == 5 && !ids.contains(6L)));
+    }
+
+    @Test
+    void nearbySearchWithoutCategoryShouldBeSkippedNotDropped() {
+        List<AiToolExecution> executions = service.executeTools(
+                null, 10L, 20L, Collections.singletonList("nearbyShopSearch"), 120D, 30D,
+                emptyScope(), Collections.<ShopKnowledge>emptyList());
+
+        assertEquals(1, executions.size());
+        assertTrue(executions.get(0).isSkipped());
+        assertEquals("nearbyShopSearch", executions.get(0).getToolName());
+    }
+
+    private ShopKnowledge knowledge(Long shopId) {
+        return new ShopKnowledge(shopId, "shop-" + shopId, 0.9D,
+                Collections.<String, Object>emptyMap());
+    }
+
+    private AiToolQueryScope emptyScope() {
+        return new AiToolQueryScope(Collections.<Long>emptyList(), Collections.<Long>emptyList(),
+                Collections.<Long>emptyList(), Collections.<String>emptyList(), null);
     }
 }

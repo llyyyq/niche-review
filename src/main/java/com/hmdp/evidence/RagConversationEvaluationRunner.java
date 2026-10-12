@@ -13,17 +13,20 @@ import com.hmdp.entity.AiMessage;
 import com.hmdp.entity.AiRequestLog;
 import com.hmdp.entity.AiToolLog;
 import com.hmdp.entity.AiTrace;
+import com.hmdp.entity.AiTraceSpan;
+import com.hmdp.entity.Shop;
 import com.hmdp.service.IAiConversationService;
 import com.hmdp.service.IAiMessageService;
 import com.hmdp.service.IAiRequestLogService;
 import com.hmdp.service.IAiToolLogService;
 import com.hmdp.service.IAiTraceService;
+import com.hmdp.service.IAiTraceSpanService;
+import com.hmdp.service.IShopService;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
@@ -37,10 +40,12 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -55,8 +60,21 @@ import java.util.stream.Collectors;
 @Slf4j
 @Component
 @Order(210)
-@ConditionalOnProperty(prefix = "ai.evaluation", name = "conversation-enabled", havingValue = "true")
 public class RagConversationEvaluationRunner implements ApplicationRunner {
+
+    private static final Set<String> CLARIFICATION_FORBIDDEN_STAGES =
+            Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList(
+                    "QUERY_PLAN_RESOLVE", "RETRIEVAL", "STRUCTURED_RETRIEVAL",
+                    "EMBEDDING", "QDRANT_SEARCH", "RESULT_MERGE", "AGENT_ROUTE",
+                    "TOOL_ROUTE", "TOOL_CALL", "FINAL_MODEL"
+            )));
+
+    private static final Set<String> READY_REQUIRED_STAGES =
+            Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList(
+                    "QUERY_PREPROCESS", "QUERY_PLAN_RESOLVE", "RETRIEVAL",
+                    "STRUCTURED_RETRIEVAL", "RESULT_MERGE", "AGENT_ROUTE",
+                    "TOOL_ROUTE", "SSE_STREAM", "MESSAGE_PERSIST"
+            )));
 
     @Resource
     private AiEvaluationProperties properties;
@@ -67,16 +85,23 @@ public class RagConversationEvaluationRunner implements ApplicationRunner {
     @Resource
     private IAiTraceService aiTraceService;
     @Resource
+    private IAiTraceSpanService aiTraceSpanService;
+    @Resource
     private IAiRequestLogService aiRequestLogService;
     @Resource
     private IAiToolLogService aiToolLogService;
     @Resource
     private IUserService userService;
     @Resource
+    private IShopService shopService;
+    @Resource
     private ObjectMapper objectMapper;
 
     @Override
     public void run(ApplicationArguments args) {
+        if (!Boolean.TRUE.equals(properties.getConversationEnabled())) {
+            return;
+        }
         try {
             runEvaluation();
         } catch (Exception e) {
@@ -99,6 +124,7 @@ public class RagConversationEvaluationRunner implements ApplicationRunner {
         if (cases.size() != expected) {
             throw new IllegalStateException("Expected " + expected + " conversation cases, actual=" + cases.size());
         }
+        resolveExpectedShopIds(cases);
         List<Record> records = new ArrayList<>();
         for (CaseDefinition definition : cases) {
             records.add(runCase(userId, definition, retrySubset));
@@ -109,6 +135,40 @@ public class RagConversationEvaluationRunner implements ApplicationRunner {
                 records.size(), retrySubset);
     }
 
+    /**
+     * Recomputes evaluation metrics from the traces already persisted by a completed
+     * conversation evaluation. It deliberately does not create conversations or call
+     * the embedding/chat providers again.
+     */
+    public void rebuildExistingMetrics() throws Exception {
+        Path source = Paths.get(properties.getConversationCasesPath());
+        List<CaseDefinition> cases = readCases(source, properties.getConversationCasesSplit());
+        int expected = Math.max(1, properties.getConversationExpectedCaseCount());
+        if (cases.size() != expected) {
+            throw new IllegalStateException("Expected " + expected + " conversation cases, actual=" + cases.size());
+        }
+        resolveExpectedShopIds(cases);
+
+        Path output = Paths.get(properties.getConversationOutputPath());
+        List<Record> records = readPersistedRecords(output, cases);
+        if (records.size() != expected) {
+            throw new IllegalStateException("Expected " + expected + " persisted records, actual=" + records.size());
+        }
+        for (Record record : records) {
+            if (record.assistantMessageId != null) {
+                try {
+                    fillTraceEvidence(record);
+                } catch (Exception e) {
+                    record.error = safeError(e);
+                }
+            }
+            evaluateAutomaticChecks(record);
+        }
+        writeCsv(output, records);
+        writeReport(Paths.get(properties.getConversationReportPath()), source, records);
+        log.info("Conversation evaluation metrics rebuilt from persisted traces, cases={}", records.size());
+    }
+
     private Record runCase(Long userId, CaseDefinition definition, boolean retrySubset) {
         Record record = new Record(definition);
         try {
@@ -117,6 +177,7 @@ public class RagConversationEvaluationRunner implements ApplicationRunner {
             AwaitedTurn finalTurn = null;
             for (String turn : definition.turns) {
                 finalTurn = sendAndAwait(userId, conversation.getId(), turn);
+                record.completedTurnCount++;
             }
             if (finalTurn == null) {
                 throw new IllegalStateException("No turns in " + definition.caseId);
@@ -130,16 +191,63 @@ public class RagConversationEvaluationRunner implements ApplicationRunner {
                     || "FAILED".equals(record.traceStatus) || "CANCELLED".equals(record.traceStatus);
             record.executionCompleted = record.messageStatus != null
                     && record.messageStatus != AiMessage.STATUS_GENERATING && record.traceComplete;
-            record.requiredToolsInvoked = record.requiredTools.stream().allMatch(record.actualTools::contains);
+            record.requiredToolsInvoked = record.requiredTools.stream().allMatch(record.successfulTools::contains);
             record.expectedEntityMentioned = record.expectedShopNames.isEmpty()
                     || record.expectedShopNames.stream().map(this::normalize)
                     .anyMatch(normalize(record.answer)::contains);
-            record.automaticPass = record.executionCompleted && "SUCCEEDED".equals(record.traceStatus)
-                    && record.requiredToolsInvoked;
+            record.hitAt1 = hitAt1(record);
+            record.hitAt3 = hitAt3(record);
+            evaluateAutomaticChecks(record);
         } catch (Exception e) {
             record.error = safeError(e);
+            record.executionCompleted = false;
+            record.traceStructureValid = false;
         }
         return record;
+    }
+
+    /**
+     * Resolves the human-readable expected shop names in the frozen fixture once,
+     * before any model call. A missing or ambiguous mapping is a fixture error, not
+     * a retrieval miss, so it is surfaced in the result CSV and excluded from Hit@K.
+     */
+    private void resolveExpectedShopIds(List<CaseDefinition> cases) {
+        List<Shop> shops = shopService.list();
+        for (CaseDefinition definition : cases) {
+            if (definition.expectedShopNames.isEmpty()) {
+                continue;
+            }
+            Set<Long> ids = new LinkedHashSet<>();
+            for (String expectedName : definition.expectedShopNames) {
+                List<Shop> matches = matchExpectedShop(shops, expectedName);
+                if (matches.size() != 1) {
+                    definition.fixtureError = matches.isEmpty()
+                            ? "Expected shop not found: " + expectedName
+                            : "Expected shop is ambiguous: " + expectedName;
+                    ids.clear();
+                    break;
+                }
+                ids.add(matches.get(0).getId());
+            }
+            definition.expectedShopIds = new ArrayList<>(ids);
+        }
+    }
+
+    private List<Shop> matchExpectedShop(List<Shop> shops, String expectedName) {
+        String normalizedExpected = normalize(expectedName);
+        List<Shop> exact = shops.stream()
+                .filter(shop -> normalizedExpected.equals(normalize(shop.getName())))
+                .collect(Collectors.toList());
+        if (!exact.isEmpty()) {
+            return exact;
+        }
+        return shops.stream()
+                .filter(shop -> {
+                    String normalizedName = normalize(shop.getName());
+                    return normalizedName.contains(normalizedExpected)
+                            || normalizedExpected.contains(normalizedName);
+                })
+                .collect(Collectors.toList());
     }
 
     private AiConversation createConversation(Long userId, String caseId, boolean retrySubset) {
@@ -243,6 +351,12 @@ public class RagConversationEvaluationRunner implements ApplicationRunner {
         record.outcome = trace.getOutcome();
         record.errorStage = trace.getErrorStage();
         record.totalMs = trace.getTotalMs();
+        record.retrievedShopIds = readMergedShopIds(record.traceId);
+
+        List<AiTraceSpan> spans = aiTraceSpanService.list(new QueryWrapper<AiTraceSpan>()
+                .eq("trace_id", record.traceId).orderByAsc("id"));
+        populateTraceMetadata(record, spans);
+
         AiRequestLog requestLog = aiRequestLogService.getOne(new QueryWrapper<AiRequestLog>()
                 .eq("trace_id", record.traceId).eq("assistant_message_id", record.assistantMessageId)
                 .eq("request_type", "chat").orderByDesc("id").last("LIMIT 1"));
@@ -258,8 +372,265 @@ public class RagConversationEvaluationRunner implements ApplicationRunner {
                 .eq("trace_id", record.traceId).eq("assistant_message_id", record.assistantMessageId).orderByAsc("id"));
         record.actualTools = tools.stream().map(AiToolLog::getToolName).filter(this::notBlank)
                 .distinct().collect(Collectors.toList());
+        record.successfulTools = tools.stream()
+                .filter(tool -> Integer.valueOf(1).equals(tool.getSuccess()))
+                .map(AiToolLog::getToolName).filter(this::notBlank)
+                .distinct().collect(Collectors.toList());
+        record.unexpectedTools = record.actualTools.stream()
+                .filter(tool -> !record.requiredTools.contains(tool))
+                .collect(Collectors.toList());
         record.toolEvidence = tools.stream().map(tool -> tool.getToolName() + ": " + limit(tool.getResultContent(), 1200))
                 .collect(Collectors.joining("\n---\n"));
+    }
+
+    private void populateTraceMetadata(Record record, List<AiTraceSpan> spans) {
+        if (spans == null) {
+            spans = Collections.emptyList();
+        }
+        LinkedHashSet<String> stages = new LinkedHashSet<>();
+        for (AiTraceSpan span : spans) {
+            if (span != null && notBlank(span.getStageName())) {
+                stages.add(span.getStageName());
+            }
+        }
+        record.traceSpanCount = spans.size();
+        record.traceStages = String.join("|", stages);
+
+        AiTraceSpan preprocess = findLastSpan(spans, "QUERY_PREPROCESS");
+        record.planMode = attributeText(preprocess, "mode");
+        record.planModelCalled = attributeBoolean(preprocess, "modelCalled");
+        record.planValidOutput = attributeBoolean(preprocess, "validModelOutput");
+        record.planTaskCount = attributeInteger(preprocess, "queryCount");
+        record.planModelAttempts = countStages(spans, "QUERY_REWRITE_MODEL");
+        if (record.planModelCalled == null) {
+            record.planModelCalled = record.planModelAttempts > 0;
+        }
+        if (record.planValidOutput == null && record.planModelAttempts > 0) {
+            record.planValidOutput = preprocess != null
+                    && "SUCCEEDED".equals(preprocess.getStatus());
+        }
+        if (!notBlank(record.planMode) && preprocess != null
+                && "FAILED".equals(preprocess.getStatus())) {
+            record.planMode = "FAILED";
+        }
+        if (record.planTaskCount == null && preprocess != null
+                && "FAILED".equals(preprocess.getStatus())) {
+            record.planTaskCount = 0;
+        }
+        record.planIntents = attributeText(preprocess, "taskIntents");
+        record.planShopNames = attributeText(preprocess, "taskShopNames");
+        record.planCategories = attributeText(preprocess, "taskCategories");
+        record.planAreas = attributeText(preprocess, "taskAreas");
+        record.planBudgets = attributeText(preprocess, "taskBudgets");
+        record.planRequiredFacts = attributeText(preprocess, "taskRequiredFacts");
+
+        AiTraceSpan resolver = findLastSpan(spans, "QUERY_PLAN_RESOLVE");
+        record.resolverStatus = resolver == null ? "" : resolver.getStatus();
+        AiTraceSpan retrieval = findLastSpan(spans, "RETRIEVAL");
+        record.semanticRequested = containsStage(spans, "EMBEDDING");
+        record.semanticDegraded = attributeBoolean(retrieval, "semanticDegraded");
+        record.structuredCandidateCount = sumAttribute(spans, "STRUCTURED_RETRIEVAL", "resultCount");
+        record.qdrantCandidateCount = sumAttribute(spans, "QDRANT_SEARCH", "candidateShopCount");
+        record.retrievalSummary = "structuredCandidates=" + text(record.structuredCandidateCount)
+                + ";qdrantCandidates=" + text(record.qdrantCandidateCount)
+                + ";mergedShopIds=" + joinLongs(record.retrievedShopIds);
+    }
+
+    private AiTraceSpan findLastSpan(List<AiTraceSpan> spans, String stageName) {
+        AiTraceSpan result = null;
+        for (AiTraceSpan span : spans) {
+            if (span != null && stageName.equals(span.getStageName())) {
+                result = span;
+            }
+        }
+        return result;
+    }
+
+    private boolean containsStage(List<AiTraceSpan> spans, String stageName) {
+        return findLastSpan(spans, stageName) != null;
+    }
+
+    private int countStages(List<AiTraceSpan> spans, String stageName) {
+        int count = 0;
+        for (AiTraceSpan span : spans) {
+            if (span != null && stageName.equals(span.getStageName())) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private int sumAttribute(List<AiTraceSpan> spans, String stageName, String attributeName) {
+        int sum = 0;
+        for (AiTraceSpan span : spans) {
+            if (span == null || !stageName.equals(span.getStageName())) {
+                continue;
+            }
+            Integer value = attributeInteger(span, attributeName);
+            if (value != null && value >= 0) {
+                sum += value;
+            }
+        }
+        return sum;
+    }
+
+    private JsonNode attributes(AiTraceSpan span) {
+        if (span == null || !notBlank(span.getAttributesJson())) {
+            return null;
+        }
+        try {
+            return objectMapper.readTree(span.getAttributesJson());
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private String attributeText(AiTraceSpan span, String name) {
+        JsonNode value = attribute(span, name);
+        return value == null || value.isNull() ? "" : value.asText("");
+    }
+
+    private Boolean attributeBoolean(AiTraceSpan span, String name) {
+        JsonNode value = attribute(span, name);
+        return value == null || value.isNull() ? null : value.asBoolean();
+    }
+
+    private Integer attributeInteger(AiTraceSpan span, String name) {
+        JsonNode value = attribute(span, name);
+        return value == null || value.isNull() || !value.canConvertToInt()
+                ? null : value.intValue();
+    }
+
+    private JsonNode attribute(AiTraceSpan span, String name) {
+        JsonNode root = attributes(span);
+        return root == null ? null : root.get(name);
+    }
+
+    private void evaluateAutomaticChecks(Record record) {
+        record.traceComplete = "SUCCEEDED".equals(record.traceStatus)
+                || "FAILED".equals(record.traceStatus) || "CANCELLED".equals(record.traceStatus);
+        record.executionCompleted = record.messageStatus != null
+                && record.messageStatus != AiMessage.STATUS_GENERATING && record.traceComplete;
+        record.requiredToolsInvoked = record.requiredTools.stream()
+                .allMatch(record.successfulTools::contains);
+        record.expectedEntityMentioned = expectedEntitiesMentioned(record);
+        record.clarificationBranchValid = !record.expectsClarification
+                || ("CLARIFIED".equals(record.outcome)
+                && record.actualTools.isEmpty()
+                && !containsAnyStage(record.traceStages, CLARIFICATION_FORBIDDEN_STAGES));
+        record.traceStructureValid = traceStructureValid(record);
+        record.automaticPass = record.executionCompleted
+                && record.traceStructureValid
+                && (record.expectsClarification || record.requiredToolsInvoked);
+    }
+
+    private boolean expectedEntitiesMentioned(Record record) {
+        if (record.expectedShopNames.isEmpty()) {
+            return true;
+        }
+        String answer = normalize(record.answer);
+        if (answer.isEmpty()) {
+            return false;
+        }
+        for (String expected : record.expectedShopNames) {
+            String fullName = normalize(expected);
+            String branchlessName = normalize(stripBranch(expected));
+            if (!answer.contains(fullName)
+                    && (branchlessName.isEmpty() || !answer.contains(branchlessName))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean traceStructureValid(Record record) {
+        if (!record.executionCompleted || !"SUCCEEDED".equals(record.traceStatus)) {
+            return false;
+        }
+        if (record.expectsClarification) {
+            return record.clarificationBranchValid
+                    && hasStage(record, "QUERY_PREPROCESS")
+                    && hasStage(record, "SSE_STREAM")
+                    && hasStage(record, "MESSAGE_PERSIST");
+        }
+        if ("UNSUPPORTED".equalsIgnoreCase(record.planMode)) {
+            return hasStage(record, "QUERY_PREPROCESS")
+                    && hasStage(record, "FINAL_MODEL")
+                    && hasStage(record, "SSE_STREAM")
+                    && hasStage(record, "MESSAGE_PERSIST");
+        }
+        if (!READY_REQUIRED_STAGES.stream().allMatch(stage -> hasStage(record, stage))) {
+            return false;
+        }
+        return "NO_EVIDENCE".equalsIgnoreCase(record.outcome)
+                || hasStage(record, "FINAL_MODEL");
+    }
+
+    private boolean hasStage(Record record, String stageName) {
+        return Arrays.asList(record.traceStages.split("\\|"))
+                .contains(stageName);
+    }
+
+    private boolean containsAnyStage(String stageList, Set<String> forbiddenStages) {
+        if (!notBlank(stageList)) {
+            return false;
+        }
+        Set<String> observed = new LinkedHashSet<>(Arrays.asList(stageList.split("\\|")));
+        for (String forbidden : forbiddenStages) {
+            if (observed.contains(forbidden)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Reads the final Top3 from the persisted RESULT_MERGE span of this exact trace. */
+    private List<Long> readMergedShopIds(String traceId) {
+        if (!notBlank(traceId)) {
+            return Collections.emptyList();
+        }
+        AiTraceSpan mergeSpan = aiTraceSpanService.getOne(new QueryWrapper<AiTraceSpan>()
+                .eq("trace_id", traceId)
+                .eq("stage_name", "RESULT_MERGE")
+                .eq("status", "SUCCEEDED")
+                .orderByDesc("id")
+                .last("LIMIT 1"));
+        if (mergeSpan == null || !notBlank(mergeSpan.getAttributesJson())) {
+            return Collections.emptyList();
+        }
+        try {
+            JsonNode shopIds = objectMapper.readTree(mergeSpan.getAttributesJson()).path("shopIds");
+            List<Long> result = new ArrayList<>();
+            if (shopIds.isArray()) {
+                for (JsonNode shopId : shopIds) {
+                    if (shopId.canConvertToLong()) {
+                        result.add(shopId.longValue());
+                    }
+                }
+                return result;
+            }
+            if (shopIds.isTextual()) {
+                // Older traces serialized List<Long> with String.valueOf(), for example
+                // "[1, 3, 7]". Keep the evaluator backward compatible with those traces.
+                String serializedIds = shopIds.asText().trim();
+                if (serializedIds.startsWith("[") && serializedIds.endsWith("]")) {
+                    serializedIds = serializedIds.substring(1, serializedIds.length() - 1).trim();
+                }
+                if (!serializedIds.isEmpty()) {
+                    for (String id : serializedIds.split(",")) {
+                        try {
+                            result.add(Long.valueOf(id.trim()));
+                        } catch (NumberFormatException ignored) {
+                            log.warn("Ignoring invalid shop ID in RESULT_MERGE trace, traceId={}", traceId);
+                        }
+                    }
+                }
+            }
+            return result;
+        } catch (IOException e) {
+            log.warn("Unable to parse RESULT_MERGE span attributes, traceId={}", traceId);
+            return Collections.emptyList();
+        }
     }
 
     private List<CaseDefinition> readCases(Path source, String split) throws IOException {
@@ -312,21 +683,43 @@ public class RagConversationEvaluationRunner implements ApplicationRunner {
 
     private void writeCsv(Path path, List<Record> records) throws IOException {
         List<String> lines = new ArrayList<>();
-        lines.add("case_id,scenario,conversation_id,user_message_id,assistant_message_id,request_id,trace_id,trace_status,outcome,error_stage,message_status,question,expected_shop_names,required_tools,actual_tools,required_tools_invoked,expected_entity_mentioned,execution_completed,automatic_pass,retrieval_ms,tool_ms,first_token_ms,total_ms,input_tokens,output_tokens,error,tool_evidence,manual_status,review_faithfulness,review_constraints,review_coverage,review_realtime_consistency,review_no_evidence_safety,review_failure_stage,review_notes,final_answer");
+        lines.add("case_id,scenario,expects_clarification,turn_count,completed_turn_count,conversation_id,user_message_id,assistant_message_id,request_id,trace_id,trace_status,outcome,error_stage,message_status,question,expected_shop_names,expected_shop_ids,retrieved_shop_ids,hit_at_1,hit_at_3,fixture_error,required_tools,actual_tools,successful_tools,unexpected_tools,required_tools_invoked,expected_entity_mentioned,execution_completed,trace_complete,trace_span_count,trace_stages,trace_structure_valid,plan_mode,plan_model_called,plan_valid_output,plan_task_count,plan_model_attempts,plan_intents,plan_shop_names,plan_categories,plan_areas,plan_budgets,plan_required_facts,resolver_status,semantic_requested,semantic_degraded,structured_candidate_count,qdrant_candidate_count,retrieval_summary,clarification_branch_valid,automatic_pass,retrieval_ms,tool_ms,first_token_ms,total_ms,input_tokens,output_tokens,error,tool_evidence,manual_status,review_faithfulness,review_constraints,review_coverage,review_realtime_consistency,review_no_evidence_safety,review_failure_stage,review_notes,final_answer");
         for (Record record : records) {
-            lines.add(csv(Arrays.asList(record.caseId, record.scenario, text(record.conversationId), text(record.userMessageId),
-                    text(record.assistantMessageId), record.requestId, record.traceId, record.traceStatus, record.outcome,
-                    record.errorStage, text(record.messageStatus), record.finalQuestion(), String.join("|", record.expectedShopNames),
-                    String.join("|", record.requiredTools), String.join("|", record.actualTools), String.valueOf(record.requiredToolsInvoked),
-                    String.valueOf(record.expectedEntityMentioned), String.valueOf(record.executionCompleted), String.valueOf(record.automaticPass),
+            lines.add(csv(Arrays.asList(record.caseId, record.scenario, String.valueOf(record.expectsClarification),
+                    text(record.turns.size()),
+                    text(record.completedTurnCount), text(record.conversationId),
+                    text(record.userMessageId), text(record.assistantMessageId), record.requestId, record.traceId,
+                    record.traceStatus, record.outcome, record.errorStage, text(record.messageStatus), record.finalQuestion(),
+                    String.join("|", record.expectedShopNames),
+                    joinLongs(record.expectedShopIds), joinLongs(record.retrievedShopIds), text(record.hitAt1), text(record.hitAt3),
+                    record.fixtureError, String.join("|", record.requiredTools), String.join("|", record.actualTools),
+                    String.join("|", record.successfulTools), String.join("|", record.unexpectedTools),
+                    String.valueOf(record.requiredToolsInvoked), String.valueOf(record.expectedEntityMentioned),
+                    String.valueOf(record.executionCompleted), String.valueOf(record.traceComplete), text(record.traceSpanCount),
+                    record.traceStages, String.valueOf(record.traceStructureValid), record.planMode,
+                    text(record.planModelCalled), text(record.planValidOutput), text(record.planTaskCount),
+                    text(record.planModelAttempts), record.planIntents, record.planShopNames, record.planCategories,
+                    record.planAreas, record.planBudgets, record.planRequiredFacts, record.resolverStatus,
+                    text(record.semanticRequested), text(record.semanticDegraded), text(record.structuredCandidateCount),
+                    text(record.qdrantCandidateCount), record.retrievalSummary, String.valueOf(record.clarificationBranchValid),
+                    String.valueOf(record.automaticPass),
                     text(record.retrievalMs), text(record.toolMs), text(record.firstTokenMs), text(record.totalMs), text(record.inputTokens),
-                    text(record.outputTokens), record.error, record.toolEvidence, "PENDING", "", "", "", "", "", "", "", record.answer)));
+                    text(record.outputTokens), record.error, record.toolEvidence, record.manualStatus,
+                    record.reviewFaithfulness, record.reviewConstraints, record.reviewCoverage,
+                    record.reviewRealtimeConsistency, record.reviewNoEvidenceSafety, record.reviewFailureStage,
+                    record.reviewNotes, record.answer)));
         }
         Files.createDirectories(path.toAbsolutePath().getParent());
-        Files.write(path, lines, StandardCharsets.UTF_8);
+        writeUtf8Bom(path, lines);
     }
 
-    private void writeReport(Path path, Path source, List<Record> records) throws IOException {
+    /**
+     * Retained only for reading historical output generated before retrieval ranks
+     * were persisted in the conversation evaluation result. New runs use the
+     * structured report method below.
+     */
+    @Deprecated
+    private void writeLegacyReport(Path path, Path source, List<Record> records) throws IOException {
         StringBuilder report = new StringBuilder();
         report.append("# 会话级 RAG 端到端评测\n\n")
                 .append("> 生成时间：").append(LocalDateTime.now()).append('\n')
@@ -335,7 +728,7 @@ public class RagConversationEvaluationRunner implements ApplicationRunner {
                 .append("|指标|结果|口径|\n|---|---:|---|\n")
                 .append("|会话链路完成率|").append(rate(records, record -> record.executionCompleted)).append("|最终消息和 CHAT Trace 均结束|\n")
                 .append("|根 Trace 成功率|").append(rate(records, record -> "SUCCEEDED".equals(record.traceStatus))).append("|最终轮 CHAT Trace 成功|\n")
-                .append("|实时工具路由匹配率|").append(rate(withTools(records), record -> record.requiredToolsInvoked)).append("|仅统计声明 required_tools 的用例|\n")
+                .append("|实时工具成功率|").append(rate(withTools(records), record -> record.requiredToolsInvoked)).append("|仅统计声明 required_tools 且对应工具成功返回的用例|\n")
                 .append("|预期实体提及率|").append(rate(records, record -> record.expectedEntityMentioned)).append("|只检查提及，不等于事实正确|\n")
                 .append("|P50 / P95 总耗时|").append(percentile(records, record -> record.totalMs, .5D)).append("ms / ")
                 .append(percentile(records, record -> record.totalMs, .95D)).append("ms|最终轮 request log|\n")
@@ -344,6 +737,151 @@ public class RagConversationEvaluationRunner implements ApplicationRunner {
                 .append("## 人工复核\n\n填写 CSV 中 `review_faithfulness`、`review_constraints`、`review_coverage`、`review_realtime_consistency`、`review_no_evidence_safety` 与 `review_failure_stage`。\n");
         Files.createDirectories(path.toAbsolutePath().getParent());
         Files.write(path, report.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
+    private void writeReport(Path path, Path source, List<Record> records) throws IOException {
+        List<Record> retrievalRecords = retrievalEligible(records);
+        List<Record> latencyRecords = latencyEligible(records);
+        long fixtureErrors = records.stream().filter(record -> notBlank(record.fixtureError)).count();
+        List<Record> modelPlanRecords = records.stream()
+                .filter(record -> Boolean.TRUE.equals(record.planModelCalled))
+                .collect(Collectors.toList());
+        List<Record> clarificationRecords = records.stream()
+                .filter(record -> record.expectsClarification)
+                .collect(Collectors.toList());
+        List<Record> reviewedRecords = records.stream()
+                .filter(record -> "PASS".equalsIgnoreCase(record.manualStatus)
+                        || "FAIL".equalsIgnoreCase(record.manualStatus))
+                .collect(Collectors.toList());
+        StringBuilder report = new StringBuilder();
+        report.append("# 固定40条会话级 Agent/RAG 端到端评测报告\n\n")
+                .append("> 生成时间：").append(LocalDateTime.now()).append('\n')
+                .append("> 用例来源：`").append(source).append("`。本报告复用项目现有固定40条案例，不宣称为未见过的盲测集。每个案例创建独立会话，逐轮调用真实 `chat()`，经过 SSE、工具、消息持久化和 Trace。\n\n")
+                .append("## 自动指标\n\n")
+                .append("| 指标 | 结果 | 口径 |\n|---|---:|---|\n")
+                .append("| 会话链路完成率 | ").append(rate(records, record -> record.executionCompleted)).append(" | 最终消息与 CHAT Trace 均已结束 |\n")
+                .append("| 根 Trace 成功率 | ").append(rate(records, record -> "SUCCEEDED".equals(record.traceStatus))).append(" | 最终轮 CHAT Trace 为 SUCCEEDED |\n")
+                .append("| 计划模型有效输出率 | ").append(rate(modelPlanRecords, record -> Boolean.TRUE.equals(record.planValidOutput))).append(" | 仅统计实际调用计划模型的案例；以 QUERY_PREPROCESS 的 validModelOutput 为准 |\n")
+                .append("| 澄清分支正确率 | ").append(rate(clarificationRecords, record -> record.clarificationBranchValid)).append(" | 场景标记为 clarify，且结果为 CLARIFIED、无下游检索/工具/最终模型 |\n")
+                .append("| 实时工具成功率 | ").append(rate(withTools(records), record -> record.requiredToolsInvoked)).append(" | 仅统计声明 required_tools 且对应工具成功返回的用例 |\n")
+                .append("| Trace 结构完整率 | ").append(rate(records, record -> record.traceStructureValid)).append(" | 依据案例类型检查计划、检索、工具路由、SSE 和消息持久化阶段 |\n")
+                .append("| 检索 Hit@1 | ").append(rate(retrievalRecords, record -> Boolean.TRUE.equals(record.hitAt1))).append(" | 最终轮 RESULT_MERGE Top1 命中预期店铺；仅统计有明确预期店铺且 fixture 有效的用例 |\n")
+                .append("| 检索 Hit@3 | ").append(rate(retrievalRecords, record -> Boolean.TRUE.equals(record.hitAt3))).append(" | 最终轮 RESULT_MERGE Top3 中任一候选命中预期店铺；与 Hit@1 使用相同分母 |\n")
+                .append("| P50 / P95 / P99 总耗时 | ").append(percentile(latencyRecords, record -> record.totalMs, .50D)).append("ms / ")
+                .append(percentile(latencyRecords, record -> record.totalMs, .95D)).append("ms / ")
+                .append(percentile(latencyRecords, record -> record.totalMs, .99D)).append("ms | 仅统计最终轮 CHAT Trace 成功且有 request log 的样本 |\n")
+                .append("| P50 / P95 / P99 首 Token | ").append(percentile(latencyRecords, record -> record.firstTokenMs, .50D)).append("ms / ")
+                .append(percentile(latencyRecords, record -> record.firstTokenMs, .95D)).append("ms / ")
+                .append(percentile(latencyRecords, record -> record.firstTokenMs, .99D)).append("ms | 仅统计最终轮 CHAT Trace 成功且有 request log 的样本 |\n")
+                .append("| Fixture 错误数 | ").append(fixtureErrors).append(" | 预期店铺名称无法唯一映射到当前 MySQL 店铺时单独报错，不计入 Hit@K |\n")
+                .append("| 人工复核完成数 | ").append(reviewedRecords.size()).append("/").append(records.size()).append(" | 仅 PASS/FAIL 视为已复核；未填写不自动判定 |\n")
+                .append("| 人工端到端通过率 | ").append(rate(reviewedRecords, record -> "PASS".equalsIgnoreCase(record.manualStatus))).append(" | 仅统计已填写 manual_status 的案例，需人工对照答案与证据 |\n\n")
+                .append("> `Hit@K` 只衡量最终检索候选是否包含预期店铺，不代表最终回答正确率。澄清题没有预期店铺，因此不计入 Hit@K；它们应通过人工复核 `review_no_evidence_safety` 判断。\n")
+                .append("> 自动指标不证明最终答案事实正确。最终答案应结合 `final_answer`、`retrieved_shop_ids`、`tool_evidence` 和 `trace_id` 人工复核。\n")
+                .append("> P99 使用 nearest-rank 计算。40 条样本下，P99 接近最大值，应与 P50/P95 一并解读。\n\n")
+                .append("## 逐条复核\n\n")
+                .append("CSV 已保留 `manual_status`、`review_faithfulness`、`review_constraints`、`review_coverage`、`review_realtime_consistency`、`review_no_evidence_safety`、`review_failure_stage` 和 `review_notes`。\n\n")
+                .append("排查顺序：先看 `plan_mode`/`plan_valid_output` 和 `trace_stages`，再看 `retrieved_shop_ids` 与 `retrieval_summary`，随后对照 `actual_tools`/`tool_evidence`，最后检查 `final_answer`。\n\n")
+                .append("## 自动失败案例\n\n")
+                .append("| 案例 | Trace | 阶段 | 原因 |\n|---|---|---|---|\n");
+        for (Record record : records) {
+            if (!record.automaticPass) {
+                report.append("| ").append(record.caseId).append(" | ")
+                        .append(notBlank(record.traceId) ? record.traceId : "-").append(" | ")
+                        .append(notBlank(record.errorStage) ? record.errorStage : "-").append(" | ")
+                        .append(reportCell(autoFailureReason(record))).append(" |\n");
+            }
+        }
+        if (records.stream().allMatch(record -> record.automaticPass)) {
+            report.append("| - | - | - | 自动检查未发现失败 |\n");
+        }
+        Files.createDirectories(path.toAbsolutePath().getParent());
+        Files.write(path, report.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
+    private List<Record> readPersistedRecords(Path path, List<CaseDefinition> cases) throws IOException {
+        if (!Files.exists(path)) {
+            throw new IllegalStateException("Conversation result file does not exist: " + path.toAbsolutePath());
+        }
+        List<List<String>> csvRecords = csvRecords(path);
+        if (csvRecords.isEmpty()) {
+            throw new IllegalStateException("Conversation result file is empty: " + path.toAbsolutePath());
+        }
+        Map<String, Integer> indexes = indexes(csvRecords.get(0));
+        requireColumns(indexes, "case_id", "conversation_id", "assistant_message_id", "trace_id",
+                "trace_status", "message_status", "actual_tools", "retrieval_ms", "tool_ms",
+                "first_token_ms", "total_ms", "input_tokens", "output_tokens", "error",
+                "tool_evidence", "final_answer");
+        Map<String, CaseDefinition> definitions = cases.stream().collect(Collectors.toMap(
+                definition -> definition.caseId, definition -> definition, (left, right) -> left, LinkedHashMap::new));
+        List<Record> result = new ArrayList<>();
+        for (int i = 1; i < csvRecords.size(); i++) {
+            List<String> row = csvRecords.get(i);
+            String caseId = value(row, indexes, "case_id");
+            if (!notBlank(caseId)) {
+                continue;
+            }
+            CaseDefinition definition = definitions.get(caseId);
+            if (definition == null) {
+                throw new IllegalStateException("Persisted result references unknown case: " + caseId);
+            }
+            Record record = new Record(definition);
+            record.turnCount = integerOrDefault(value(row, indexes, "turn_count"), definition.turns.size());
+            record.completedTurnCount = integerOrDefault(value(row, indexes, "completed_turn_count"), 0);
+            record.conversationId = longValue(value(row, indexes, "conversation_id"));
+            record.userMessageId = longValue(value(row, indexes, "user_message_id"));
+            record.assistantMessageId = longValue(value(row, indexes, "assistant_message_id"));
+            record.requestId = value(row, indexes, "request_id");
+            record.traceId = value(row, indexes, "trace_id");
+            record.traceStatus = value(row, indexes, "trace_status");
+            record.outcome = value(row, indexes, "outcome");
+            record.errorStage = value(row, indexes, "error_stage");
+            record.messageStatus = integerValue(value(row, indexes, "message_status"));
+            record.actualTools = pipe(value(row, indexes, "actual_tools"));
+            record.successfulTools = indexes.containsKey("successful_tools")
+                    ? pipe(value(row, indexes, "successful_tools"))
+                    : Collections.<String>emptyList();
+            record.retrievalMs = longValue(value(row, indexes, "retrieval_ms"));
+            record.toolMs = longValue(value(row, indexes, "tool_ms"));
+            record.firstTokenMs = longValue(value(row, indexes, "first_token_ms"));
+            record.totalMs = longValue(value(row, indexes, "total_ms"));
+            record.inputTokens = integerValue(value(row, indexes, "input_tokens"));
+            record.outputTokens = integerValue(value(row, indexes, "output_tokens"));
+            record.error = value(row, indexes, "error");
+            record.toolEvidence = value(row, indexes, "tool_evidence");
+            record.manualStatus = valueOrDefault(row, indexes, "manual_status", "PENDING");
+            record.reviewFaithfulness = value(row, indexes, "review_faithfulness");
+            record.reviewConstraints = value(row, indexes, "review_constraints");
+            record.reviewCoverage = value(row, indexes, "review_coverage");
+            record.reviewRealtimeConsistency = value(row, indexes, "review_realtime_consistency");
+            record.reviewNoEvidenceSafety = value(row, indexes, "review_no_evidence_safety");
+            record.reviewFailureStage = value(row, indexes, "review_failure_stage");
+            record.reviewNotes = value(row, indexes, "review_notes");
+            record.answer = value(row, indexes, "final_answer");
+            record.planMode = value(row, indexes, "plan_mode");
+            record.planModelCalled = booleanValue(value(row, indexes, "plan_model_called"));
+            record.planValidOutput = booleanValue(value(row, indexes, "plan_valid_output"));
+            record.planTaskCount = integerValue(value(row, indexes, "plan_task_count"));
+            record.planModelAttempts = integerValue(value(row, indexes, "plan_model_attempts"));
+            record.planIntents = value(row, indexes, "plan_intents");
+            record.planShopNames = value(row, indexes, "plan_shop_names");
+            record.planCategories = value(row, indexes, "plan_categories");
+            record.planAreas = value(row, indexes, "plan_areas");
+            record.planBudgets = value(row, indexes, "plan_budgets");
+            record.planRequiredFacts = value(row, indexes, "plan_required_facts");
+            record.resolverStatus = value(row, indexes, "resolver_status");
+            record.semanticRequested = booleanValue(value(row, indexes, "semantic_requested"));
+            record.semanticDegraded = booleanValue(value(row, indexes, "semantic_degraded"));
+            record.structuredCandidateCount = integerValue(value(row, indexes, "structured_candidate_count"));
+            record.qdrantCandidateCount = integerValue(value(row, indexes, "qdrant_candidate_count"));
+            record.retrievalSummary = value(row, indexes, "retrieval_summary");
+            record.traceSpanCount = integerValue(value(row, indexes, "trace_span_count"));
+            record.traceStages = value(row, indexes, "trace_stages");
+            record.traceStructureValid = Boolean.TRUE.equals(booleanValue(value(row, indexes, "trace_structure_valid")));
+            record.clarificationBranchValid = Boolean.TRUE.equals(booleanValue(value(row, indexes, "clarification_branch_valid")));
+            result.add(record);
+        }
+        return result;
     }
 
     private <T> T withUser(Long userId, UserCall<T> call) {
@@ -359,29 +897,137 @@ public class RagConversationEvaluationRunner implements ApplicationRunner {
 
     private long turnTimeoutMs() { return Math.max(1000L, properties.getConversationTurnTimeoutMs()); }
     private List<Record> withTools(List<Record> records) { return records.stream().filter(record -> !record.requiredTools.isEmpty()).collect(Collectors.toList()); }
+    private List<Record> retrievalEligible(List<Record> records) {
+        return records.stream()
+                .filter(record -> !notBlank(record.fixtureError))
+                .filter(record -> !record.expectedShopIds.isEmpty())
+                .collect(Collectors.toList());
+    }
+    private List<Record> latencyEligible(List<Record> records) {
+        return records.stream()
+                .filter(record -> "SUCCEEDED".equals(record.traceStatus))
+                .filter(record -> record.totalMs != null || record.firstTokenMs != null)
+                .collect(Collectors.toList());
+    }
+    private Boolean hitAt1(Record record) {
+        if (notBlank(record.fixtureError) || record.expectedShopIds.isEmpty()) {
+            return null;
+        }
+        return !record.retrievedShopIds.isEmpty()
+                && record.expectedShopIds.contains(record.retrievedShopIds.get(0));
+    }
+    private Boolean hitAt3(Record record) {
+        if (notBlank(record.fixtureError) || record.expectedShopIds.isEmpty()) {
+            return null;
+        }
+        return record.retrievedShopIds.stream().limit(3)
+                .anyMatch(record.expectedShopIds::contains);
+    }
     private String rate(List<Record> records, RecordPredicate predicate) { if (records.isEmpty()) return "N/A"; long count = records.stream().filter(predicate::test).count(); return String.format(Locale.ROOT, "%.2f%% (%d/%d)", count * 100D / records.size(), count, records.size()); }
     private long percentile(List<Record> records, LongValue value, double p) { List<Long> values = records.stream().map(value::get).filter(v -> v != null && v >= 0).sorted().collect(Collectors.toList()); return values.isEmpty() ? 0L : values.get(Math.max(0, (int) Math.ceil(values.size() * p) - 1)); }
-    private Map<String, Integer> indexes(List<String> headers) { Map<String, Integer> result = new LinkedHashMap<>(); for (int i = 0; i < headers.size(); i++) result.put(headers.get(i), i); return result; }
+    private Map<String, Integer> indexes(List<String> headers) { Map<String, Integer> result = new LinkedHashMap<>(); for (int i = 0; i < headers.size(); i++) result.put(stripBom(headers.get(i)), i); return result; }
     private void requireColumns(Map<String, Integer> indexes, String... names) { for (String name : names) if (!indexes.containsKey(name)) throw new IllegalStateException("Missing source column: " + name); }
     private String value(List<String> row, Map<String, Integer> indexes, String key) { Integer i = indexes.get(key); return i == null || i >= row.size() ? "" : row.get(i); }
+    private String valueOrDefault(List<String> row, Map<String, Integer> indexes, String key, String fallback) { String value = value(row, indexes, key); return notBlank(value) ? value : fallback; }
+    private Long longValue(String value) { try { return notBlank(value) ? Long.valueOf(value) : null; } catch (NumberFormatException ignored) { return null; } }
+    private Integer integerValue(String value) { try { return notBlank(value) ? Integer.valueOf(value) : null; } catch (NumberFormatException ignored) { return null; } }
+    private Integer integerOrDefault(String value, int fallback) { Integer parsed = integerValue(value); return parsed == null ? fallback : parsed; }
+    private Boolean booleanValue(String value) { return "true".equalsIgnoreCase(value) ? Boolean.TRUE : "false".equalsIgnoreCase(value) ? Boolean.FALSE : null; }
     private List<String> pipe(String value) { return value == null || value.trim().isEmpty() ? Collections.emptyList() : Arrays.stream(value.split("\\|")).map(String::trim).filter(this::notBlank).collect(Collectors.toList()); }
     private boolean notBlank(String value) { return value != null && !value.trim().isEmpty(); }
     private String normalize(String value) { return value == null ? "" : value.toLowerCase().replaceAll("[\\s\\p{P}\\p{S}]", ""); }
+    private String stripBranch(String value) { return value == null ? "" : value.replaceFirst("[\\(\\uff08].*$", ""); }
     private String text(Object value) { return value == null ? "" : String.valueOf(value); }
+    private String joinLongs(List<Long> values) { return values.stream().map(String::valueOf).collect(Collectors.joining("|")); }
     private String limit(String value, int max) { if (value == null || value.length() <= max) return value == null ? "" : value; return value.substring(0, max - 3) + "..."; }
     private String safeError(Exception error) { return limit((error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage()).replaceAll("[\\r\\n]+", " "), 512); }
+    private String autoFailureReason(Record record) {
+        if (notBlank(record.error)) return record.error;
+        if (!record.executionCompleted) return "消息或 CHAT Trace 未完成";
+        if (!record.traceStructureValid) return "Trace 阶段不完整，缺少：" + missingStages(record);
+        if (!record.requiredToolsInvoked) return "required_tools 未全部成功执行";
+        if (!record.clarificationBranchValid) return "澄清分支执行了不应出现的下游阶段";
+        return "自动检查未通过";
+    }
+    private String missingStages(Record record) {
+        List<String> expected = new ArrayList<>();
+        if (record.expectsClarification) {
+            expected.add("QUERY_PREPROCESS");
+            expected.add("SSE_STREAM");
+            expected.add("MESSAGE_PERSIST");
+        } else {
+            expected.addAll(READY_REQUIRED_STAGES);
+            if (!"NO_EVIDENCE".equalsIgnoreCase(record.outcome)) expected.add("FINAL_MODEL");
+        }
+        return expected.stream().filter(stage -> !hasStage(record, stage)).collect(Collectors.joining("|"));
+    }
+    private String reportCell(String value) { return value == null ? "" : value.replace("|", "/").replace("\n", " ").replace("\r", " "); }
+    private String stripBom(String value) { return value != null && !value.isEmpty() && value.charAt(0) == '\uFEFF' ? value.substring(1) : value; }
+    private void writeUtf8Bom(Path path, List<String> lines) throws IOException {
+        byte[] bom = new byte[] {(byte) 0xEF, (byte) 0xBB, (byte) 0xBF};
+        byte[] content = String.join(System.lineSeparator(), lines).concat(System.lineSeparator())
+                .getBytes(StandardCharsets.UTF_8);
+        byte[] all = new byte[bom.length + content.length];
+        System.arraycopy(bom, 0, all, 0, bom.length);
+        System.arraycopy(content, 0, all, bom.length, content.length);
+        Files.write(path, all);
+    }
     private List<String> csvValues(String line) { List<String> values = new ArrayList<>(); StringBuilder value = new StringBuilder(); boolean quoted = false; for (int i = 0; i < line.length(); i++) { char current = line.charAt(i); if (current == '"') { if (quoted && i + 1 < line.length() && line.charAt(i + 1) == '"') { value.append('"'); i++; } else quoted = !quoted; } else if (current == ',' && !quoted) { values.add(value.toString()); value.setLength(0); } else value.append(current); } values.add(value.toString()); return values; }
+    private List<List<String>> csvRecords(Path path) throws IOException {
+        String content = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
+        List<List<String>> records = new ArrayList<>();
+        List<String> row = new ArrayList<>();
+        StringBuilder value = new StringBuilder();
+        boolean quoted = false;
+        for (int i = 0; i < content.length(); i++) {
+            char current = content.charAt(i);
+            if (current == '"') {
+                if (quoted && i + 1 < content.length() && content.charAt(i + 1) == '"') {
+                    value.append('"');
+                    i++;
+                } else {
+                    quoted = !quoted;
+                }
+            } else if (current == ',' && !quoted) {
+                row.add(value.toString());
+                value.setLength(0);
+            } else if ((current == '\n' || current == '\r') && !quoted) {
+                if (current == '\r' && i + 1 < content.length() && content.charAt(i + 1) == '\n') {
+                    i++;
+                }
+                row.add(value.toString());
+                records.add(row);
+                row = new ArrayList<>();
+                value.setLength(0);
+            } else {
+                value.append(current);
+            }
+        }
+        if (value.length() > 0 || !row.isEmpty()) {
+            row.add(value.toString());
+            records.add(row);
+        }
+        return records;
+    }
     private String csv(List<String> values) { return values.stream().map(value -> { String safe = value == null ? "" : value; return safe.contains(",") || safe.contains("\"") || safe.contains("\n") ? "\"" + safe.replace("\"", "\"\"") + "\"" : safe; }).collect(Collectors.joining(",")); }
 
     private interface UserCall<T> { T call(); }
     private interface RecordPredicate { boolean test(Record record); }
     private interface LongValue { Long get(Record record); }
     private static class AwaitedTurn { private final Long userMessageId; private final AiMessage assistant; private AwaitedTurn(Long userMessageId, AiMessage assistant) { this.userMessageId = userMessageId; this.assistant = assistant; } }
-    private static class CaseDefinition { private String caseId; private String scenario; private List<String> turns = Collections.emptyList(); private List<String> expectedShopNames = Collections.emptyList(); private List<String> requiredTools = Collections.emptyList(); }
+    private static class CaseDefinition {
+        private String caseId;
+        private String scenario;
+        private List<String> turns = Collections.emptyList();
+        private List<String> expectedShopNames = Collections.emptyList();
+        private List<Long> expectedShopIds = Collections.emptyList();
+        private List<String> requiredTools = Collections.emptyList();
+        private String fixtureError;
+    }
     private static class Record {
-        private final String caseId; private final String scenario; private final List<String> turns; private final List<String> expectedShopNames; private final List<String> requiredTools;
-        private Long conversationId; private Long userMessageId; private Long assistantMessageId; private String requestId; private String traceId; private String traceStatus; private String outcome; private String errorStage; private Integer messageStatus; private List<String> actualTools = Collections.emptyList(); private boolean requiredToolsInvoked; private boolean expectedEntityMentioned; private boolean executionCompleted; private boolean traceComplete; private boolean automaticPass; private Long retrievalMs; private Long toolMs; private Long firstTokenMs; private Long totalMs; private Integer inputTokens; private Integer outputTokens; private String error; private String toolEvidence; private String answer;
-        private Record(CaseDefinition definition) { caseId = definition.caseId; scenario = definition.scenario; turns = definition.turns; expectedShopNames = definition.expectedShopNames; requiredTools = definition.requiredTools; }
+        private final String caseId; private final String scenario; private final List<String> turns; private final List<String> expectedShopNames; private final List<Long> expectedShopIds; private final List<String> requiredTools; private final String fixtureError; private final boolean expectsClarification;
+        private Long conversationId; private Long userMessageId; private Long assistantMessageId; private String requestId; private String traceId; private String traceStatus; private String outcome; private String errorStage; private Integer messageStatus; private List<String> actualTools = Collections.emptyList(); private List<String> successfulTools = Collections.emptyList(); private List<String> unexpectedTools = Collections.emptyList(); private List<Long> retrievedShopIds = Collections.emptyList(); private boolean requiredToolsInvoked; private boolean expectedEntityMentioned; private Boolean hitAt1; private Boolean hitAt3; private boolean executionCompleted; private boolean traceComplete; private boolean traceStructureValid; private boolean clarificationBranchValid; private boolean automaticPass; private Integer turnCount; private int completedTurnCount; private Integer traceSpanCount; private String traceStages; private String planMode; private Boolean planModelCalled; private Boolean planValidOutput; private Integer planTaskCount; private Integer planModelAttempts; private String planIntents; private String planShopNames; private String planCategories; private String planAreas; private String planBudgets; private String planRequiredFacts; private String resolverStatus; private Boolean semanticRequested; private Boolean semanticDegraded; private Integer structuredCandidateCount; private Integer qdrantCandidateCount; private String retrievalSummary; private Long retrievalMs; private Long toolMs; private Long firstTokenMs; private Long totalMs; private Integer inputTokens; private Integer outputTokens; private String error; private String toolEvidence; private String answer; private String manualStatus = "PENDING"; private String reviewFaithfulness; private String reviewConstraints; private String reviewCoverage; private String reviewRealtimeConsistency; private String reviewNoEvidenceSafety; private String reviewFailureStage; private String reviewNotes;
+        private Record(CaseDefinition definition) { caseId = definition.caseId; scenario = definition.scenario; turns = definition.turns; turnCount = definition.turns.size(); expectedShopNames = definition.expectedShopNames; expectedShopIds = definition.expectedShopIds; requiredTools = definition.requiredTools; fixtureError = definition.fixtureError; expectsClarification = "clarify".equalsIgnoreCase(definition.scenario); clarificationBranchValid = !expectsClarification; }
         private String finalQuestion() { return turns.isEmpty() ? "" : turns.get(turns.size() - 1); }
     }
 }

@@ -19,7 +19,6 @@ import java.util.concurrent.Executor;
         AiKnowledgeProperties.class,
         AiEvaluationProperties.class,
         AiMemoryProperties.class,
-        AiAgentProperties.class,
         AiQueryRewriteProperties.class,
         AiTraceProperties.class
 })

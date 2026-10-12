@@ -9,25 +9,6 @@ public class AiEvaluationProperties {
 
     private Boolean enabled = false;
 
-    private String mode = "rag";
-
-    private String ragCasesPath = "docs/project-proof/rag-cases.csv";
-
-    private String queryRewriteCasesPath = "docs/project-proof/query-rewrite-cases.csv";
-
-    private String queryRewriteReportPath = "docs/project-proof/query-rewrite-evaluation.md";
-
-    /** Defaults to the known TEST partition, which is regression evidence only. */
-    private String ragAnswerSourcePath = "docs/project-proof/query-rewrite-cases.csv";
-
-    private String ragAnswerSourceSplit = "TEST";
-
-    private Integer ragAnswerExpectedCaseCount = 40;
-
-    private String ragAnswerCasesPath = "docs/project-proof/rag-answer-regression.csv";
-
-    private String ragAnswerReportPath = "docs/project-proof/rag-answer-regression.md";
-
     /** Runs real persisted conversations through the public chat service. */
     private Boolean conversationEnabled = false;
 

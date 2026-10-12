@@ -1,59 +1,87 @@
 package com.hmdp.ai;
 
-import com.hmdp.config.AiAgentProperties;
 import com.hmdp.service.IAiReadOnlyToolService;
 import com.hmdp.service.IAiTraceService;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.Resource;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
-import java.util.LinkedHashMap;
 import java.util.Map;
 
-@Slf4j
+/**
+ * Executes only tools declared by a program-validated query plan. Tool choice
+ * is deterministic: the query-plan model describes required live facts, then
+ * Java maps those facts to the local read-only tool whitelist.
+ */
 @Component
 public class AiAgentRunner {
 
-    @Resource
-    private AiToolPlanner aiToolPlanner;
+    private static final String NO_LOCATION_REASON =
+            "Not queried: the browser did not provide a valid location. "
+                    + "Do not infer that no nearby store exists.";
 
     @Resource
     private IAiReadOnlyToolService aiReadOnlyToolService;
 
     @Resource
-    private AiAgentProperties aiAgentProperties;
-
-    @Resource
     private IAiTraceService aiTraceService;
 
-    @Autowired(required = false)
-    private List<AiExternalToolProvider> externalToolProviders = Collections.emptyList();
-
-    public List<AiToolExecution> run(Long conversationId, Long userId, String question,
-                                     Double x, Double y, List<ShopKnowledge> retrievedShops) {
-        return run(null, conversationId, userId, question, x, y, retrievedShops);
-    }
-
-    public List<AiToolExecution> run(AiTraceContext traceContext,
-                                     Long conversationId, Long userId, String question,
-                                     Double x, Double y, List<ShopKnowledge> retrievedShops) {
+    /**
+     * Executes each task in isolation so evidence and live facts from one
+     * request goal cannot be attributed to another goal in the final prompt.
+     */
+    public List<AiToolExecution> runPerTask(AiTraceContext traceContext,
+                                            Long conversationId, Long userId,
+                                            AiResolvedQueryPlan resolvedPlan,
+                                            Double x, Double y,
+                                            List<AiTaskRetrievalResult> taskRetrievalResults) {
         AiTraceSpanScope routeSpan = traceContext == null || aiTraceService == null
-                ? null : aiTraceService.startSpan(traceContext, "AGENT_ROUTE");
+                ? null : aiTraceService.startSpan(traceContext, "AGENT_ROUTE",
+                routeAttributes(resolvedPlan));
         AiTraceContext routeContext = routeSpan == null ? traceContext : routeSpan.getContext();
         try {
-            List<AiToolExecution> executions = doRun(routeContext, conversationId, userId,
-                    question, x, y, retrievedShops);
-            if (routeSpan != null) {
-                Map<String, Object> attributes = new LinkedHashMap<>();
-                attributes.put("toolCount", executions.size());
-                routeSpan.success(attributes);
+            if (resolvedPlan == null || !resolvedPlan.isReady()) {
+                completeRoute(routeSpan, Collections.<AiToolExecution>emptyList());
+                return Collections.emptyList();
             }
+
+            List<List<String>> toolsByTask = planTools(routeContext, resolvedPlan, x, y);
+            List<AiToolExecution> executions = new ArrayList<>();
+            List<AiResolvedQueryTask> tasks = resolvedPlan.getTasks();
+            for (int index = 0; index < tasks.size(); index++) {
+                AiResolvedQueryTask task = tasks.get(index);
+                if (!hasValidLocation(x, y) && task.getRequiredFacts().contains("NEARBY_SHOPS")) {
+                    executions.add(AiToolExecution.skipped("nearbyShopSearch", NO_LOCATION_REASON)
+                            .withTaskIndex(index + 1));
+                }
+                List<String> toolNames = toolsByTask.get(index);
+                if (toolNames.isEmpty()) {
+                    continue;
+                }
+                AiTaskRetrievalResult taskResult = taskResultAt(taskRetrievalResults, index + 1);
+                List<ShopKnowledge> candidates = taskResult == null
+                        ? Collections.<ShopKnowledge>emptyList() : taskResult.getCandidates();
+                AiTraceContext taskContext = routeContext == null
+                        ? null : routeContext.withTaskIndex(index + 1);
+                AiToolQueryScope scope = new AiToolQueryScope(
+                        task.getShopIds(), task.getExcludedShopIds(), task.getTypeIds(),
+                        task.getAreas(), task.getMaxAveragePrice());
+                List<AiToolExecution> taskExecutions = aiReadOnlyToolService.executeTools(
+                        taskContext, conversationId, userId, toolNames, x, y, scope, candidates);
+                if (taskExecutions == null) {
+                    continue;
+                }
+                for (AiToolExecution execution : taskExecutions) {
+                    if (execution != null) {
+                        executions.add(execution.withTaskIndex(index + 1));
+                    }
+                }
+            }
+            completeRoute(routeSpan, executions);
             return executions;
         } catch (RuntimeException e) {
             if (routeSpan != null) {
@@ -63,141 +91,95 @@ public class AiAgentRunner {
         }
     }
 
-    private List<AiToolExecution> doRun(AiTraceContext traceContext,
-                                        Long conversationId, Long userId, String question,
-                                        Double x, Double y, List<ShopKnowledge> retrievedShops) {
-        if (!Boolean.TRUE.equals(aiAgentProperties.getEnabled())) {
-            return aiReadOnlyToolService.executeRelevantTools(
-                    traceContext, conversationId, userId, question, x, y, retrievedShops);
-        }
-        if (Boolean.TRUE.equals(aiAgentProperties.getFastPathEnabled())
-                && aiReadOnlyToolService.shouldUseDirectToolRouting(question, x, y)) {
-            log.debug("AI direct tool routing selected, conversationId={}", conversationId);
-            return aiReadOnlyToolService.executeRelevantTools(
-                    traceContext, conversationId, userId, question, x, y, retrievedShops);
-        }
-        if (Boolean.TRUE.equals(aiAgentProperties.getFastPathEnabled()) && !requiresPlanning(question)) {
-            log.debug("AI retrieval-only path selected, conversationId={}", conversationId);
-            return Collections.emptyList();
-        }
-        List<String> availableTools = availableToolNames();
-        List<AiToolExecution> executions = new ArrayList<>();
-        Set<String> usedTools = new LinkedHashSet<>();
-        int maxSteps = Math.max(1, aiAgentProperties.getMaxSteps());
-        for (int step = 1; step <= maxSteps; step++) {
-            AiToolPlan plan = aiToolPlanner.plan(traceContext, conversationId, userId, question,
-                    availableTools, new ArrayList<>(usedTools), executions);
-            if (plan == null) {
-                log.info("Agent planning fell back to legacy routing, conversationId={}", conversationId);
-                return executions.isEmpty()
-                        ? aiReadOnlyToolService.executeRelevantTools(
-                                traceContext, conversationId, userId, question, x, y, retrievedShops)
-                        : executions;
+    private List<List<String>> planTools(AiTraceContext routeContext,
+                                         AiResolvedQueryPlan resolvedPlan,
+                                         Double x, Double y) {
+        AiTraceSpanScope planSpan = routeContext == null || aiTraceService == null
+                ? null : aiTraceService.startSpan(routeContext, "TOOL_ROUTE",
+                routeAttributes(resolvedPlan));
+        try {
+            List<List<String>> toolsByTask = new ArrayList<>();
+            int plannedToolCount = 0;
+            for (AiResolvedQueryTask task : resolvedPlan.getTasks()) {
+                List<String> taskTools = toolsForTask(task, x, y);
+                toolsByTask.add(taskTools);
+                plannedToolCount += taskTools.size();
             }
-            if (plan.isFinished()) {
-                log.debug("Agent terminated normally, conversationId={}, step={}", conversationId, step);
-                return executions;
+            if (planSpan != null) {
+                Map<String, Object> attributes = new LinkedHashMap<>();
+                attributes.put("structuredPlan", true);
+                attributes.put("taskCount", toolsByTask.size());
+                attributes.put("toolCount", plannedToolCount);
+                planSpan.success(attributes);
             }
-            List<String> requested = selectUnusedTools(plan.getToolNames(), usedTools);
-            if (requested.isEmpty()) {
-                log.debug("Agent terminated because no executable tool remained, conversationId={}, step={}", conversationId, step);
-                return executions;
+            return toolsByTask;
+        } catch (RuntimeException e) {
+            if (planSpan != null) {
+                planSpan.failure(e);
             }
-            List<AiToolExecution> stepResults = executeTools(
-                    traceContext, conversationId, userId, requested, question, x, y, retrievedShops);
-            executions.addAll(stepResults);
-            usedTools.addAll(requested);
+            throw e;
         }
-        log.info("Agent stopped at configured step limit, conversationId={}, maxSteps={}", conversationId, maxSteps);
-        return executions;
     }
 
-    private boolean requiresPlanning(String question) {
-        if (question == null) {
-            return false;
+    private List<String> toolsForTask(AiResolvedQueryTask task, Double x, Double y) {
+        LinkedHashSet<String> names = new LinkedHashSet<>();
+        if (task == null) {
+            return new ArrayList<>();
         }
-        String normalized = question.toLowerCase();
-        return containsAny(normalized, "recommend", "compare", "versus", "suitable", "budget",
-                "\u63a8\u8350", "\u5bf9\u6bd4", "\u6bd4\u8f83", "\u9002\u5408", "\u9884\u7b97", "\u805a\u9910", "\u7ea6\u4f1a", "\u600e\u4e48\u9009");
-    }
-
-    private boolean containsAny(String value, String... keywords) {
-        for (String keyword : keywords) {
-            if (value.contains(keyword)) {
-                return true;
+        for (String fact : task.getRequiredFacts()) {
+            if ("SHOP_DETAIL".equals(fact)) {
+                names.add("shopDetail");
+            } else if ("ACTIVE_VOUCHER".equals(fact)) {
+                names.add("voucherQuery");
+            } else if ("PUBLIC_BLOG".equals(fact)) {
+                names.add("blogSearch");
+            } else if ("NEARBY_SHOPS".equals(fact) && hasValidLocation(x, y)) {
+                names.add("nearbyShopSearch");
             }
-        }
-        return false;
-    }
-
-    private List<String> availableToolNames() {
-        Set<String> names = new LinkedHashSet<>(aiReadOnlyToolService.supportedToolNames());
-        for (AiExternalToolProvider provider : externalToolProviders) {
-            names.addAll(provider.supportedToolNames());
         }
         return new ArrayList<>(names);
     }
 
-    private List<String> selectUnusedTools(List<String> requested, Set<String> usedTools) {
-        int limit = Math.max(1, aiAgentProperties.getMaxToolsPerStep());
-        List<String> selected = new ArrayList<>();
-        for (String tool : requested) {
-            if (usedTools.contains(tool)) {
-                continue;
-            }
-            selected.add(tool);
-            if (selected.size() == limit) {
-                break;
-            }
-        }
-        return selected;
+    private boolean hasValidLocation(Double x, Double y) {
+        return x != null && y != null
+                && x >= -180D && x <= 180D
+                && y >= -90D && y <= 90D;
     }
 
-    private List<AiToolExecution> executeTools(AiTraceContext traceContext,
-                                               Long conversationId, Long userId, List<String> toolNames,
-                                               String question, Double x, Double y, List<ShopKnowledge> retrievedShops) {
-        List<String> localTools = new ArrayList<>();
-        List<AiToolExecution> results = new ArrayList<>();
-        for (String toolName : toolNames) {
-            if (aiReadOnlyToolService.supportedToolNames().contains(toolName)) {
-                localTools.add(toolName);
-                continue;
-            }
-            executeExternalTool(results, new AiToolInvocation(
-                    traceContext, conversationId, userId, toolName, question, x, y, retrievedShops));
+    private AiTaskRetrievalResult taskResultAt(List<AiTaskRetrievalResult> taskResults, int taskIndex) {
+        if (taskResults == null) {
+            return null;
         }
-        results.addAll(aiReadOnlyToolService.executeTools(
-                traceContext, conversationId, userId, localTools, x, y, retrievedShops));
-        return results;
+        for (AiTaskRetrievalResult taskResult : taskResults) {
+            if (taskResult != null && taskResult.getTaskIndex() == taskIndex) {
+                return taskResult;
+            }
+        }
+        return null;
     }
 
-    private void executeExternalTool(List<AiToolExecution> results, AiToolInvocation invocation) {
-        for (AiExternalToolProvider provider : externalToolProviders) {
-            if (!provider.supportedToolNames().contains(invocation.getToolName())) {
-                continue;
-            }
-            Map<String, Object> attributes = new LinkedHashMap<>();
-            attributes.put("toolName", invocation.getToolName());
-            attributes.put("toolCallId", invocation.getToolCallId());
-            attributes.put("provider", provider.getProviderName());
-            AiTraceSpanScope toolSpan = invocation.getTraceContext() == null || aiTraceService == null
-                    ? null : aiTraceService.startSpan(invocation.getTraceContext(), "TOOL_CALL", attributes);
-            try {
-                AiToolExecution result = provider.execute(invocation);
-                if (result != null) {
-                    results.add(result);
-                }
-                if (toolSpan != null) {
-                    toolSpan.success(attributes);
-                }
-            } catch (Exception e) {
-                if (toolSpan != null) {
-                    toolSpan.failure(e);
-                }
-                log.warn("External AI tool failed, provider={}, toolName={}",
-                        provider.getProviderName(), invocation.getToolName(), e);
-            }
+    private Map<String, Object> routeAttributes(AiResolvedQueryPlan plan) {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("structuredPlan", true);
+        attributes.put("taskCount", plan == null ? 0 : plan.getTasks().size());
+        attributes.put("requiredFactCount", plan == null ? 0 : plan.requiredFacts().size());
+        return attributes;
+    }
+
+    private void completeRoute(AiTraceSpanScope routeSpan, List<AiToolExecution> executions) {
+        if (routeSpan == null) {
             return;
         }
+        int skippedCount = 0;
+        for (AiToolExecution execution : executions) {
+            if (execution.isSkipped()) {
+                skippedCount++;
+            }
+        }
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("toolCount", executions.size());
+        attributes.put("skippedToolCount", skippedCount);
+        attributes.put("structuredPlan", true);
+        routeSpan.success(attributes);
     }
 }

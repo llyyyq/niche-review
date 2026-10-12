@@ -13,6 +13,11 @@ ai:
   evaluation:
     enabled: false
     conversation-enabled: true
+    conversation-cases-path: docs/project-proof/rag-conversation-holdout.csv
+    conversation-cases-split: HOLDOUT
+    conversation-expected-case-count: 40
+    conversation-output-path: docs/project-proof/rag-conversation-holdout-result.csv
+    conversation-report-path: docs/project-proof/rag-conversation-holdout-report.md
     # 1012 is the local demonstration user used by the current project data. Override only
     # when that user does not exist in a different local database.
     conversation-user-id: ${AI_EVALUATION_USER_ID:1012}

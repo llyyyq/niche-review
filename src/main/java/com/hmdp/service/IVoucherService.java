@@ -18,7 +18,7 @@ public interface IVoucherService extends IService<Voucher> {
 
     Result queryVoucherOfShop(Long shopId);
 
-    List<Voucher> listEnabledVouchersForKnowledge();
+    List<Voucher> listEnabledVouchersForKnowledge(List<Long> shopIds);
 
     void addVoucher(Voucher voucher);
 

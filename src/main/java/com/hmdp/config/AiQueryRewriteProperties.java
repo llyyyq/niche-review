@@ -9,17 +9,17 @@ public class AiQueryRewriteProperties {
 
     private Boolean enabled = true;
 
-    private Integer longQueryThresholdChars = 160;
-
     private Integer maxQueryChars = 160;
 
-    private Integer maxSubQueries = 3;
+    /** Maximum independent business tasks accepted from one model response. */
+    private Integer maxTasks = 3;
+
+    /** One retry is enough to handle transient provider/format failures without hiding latency. */
+    private Integer maxAttempts = 2;
 
     private Integer contextMessageLimit = 4;
 
     private Integer maxContextChars = 2400;
 
-    private Integer maxOutputTokens = 256;
-
-    private Integer readTimeoutMs = 8000;
+    private Integer readTimeoutMs = 15000;
 }

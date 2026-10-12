@@ -15,18 +15,27 @@ public final class AiTraceContext {
     private final Long userMessageId;
     private final Long assistantMessageId;
     private final long traceStartedNanos;
+    private final int taskIndex;
 
     public AiTraceContext(String requestId, String traceId, String rootSpanId, String currentSpanId,
                           String parentSpanId,
                           Long conversationId, Long userId, Long userMessageId, Long assistantMessageId) {
         this(requestId, traceId, rootSpanId, currentSpanId, parentSpanId,
-                conversationId, userId, userMessageId, assistantMessageId, System.nanoTime());
+                conversationId, userId, userMessageId, assistantMessageId, System.nanoTime(), 0);
     }
 
     public AiTraceContext(String requestId, String traceId, String rootSpanId, String currentSpanId,
                           String parentSpanId,
                           Long conversationId, Long userId, Long userMessageId, Long assistantMessageId,
                           long traceStartedNanos) {
+        this(requestId, traceId, rootSpanId, currentSpanId, parentSpanId,
+                conversationId, userId, userMessageId, assistantMessageId, traceStartedNanos, 0);
+    }
+
+    private AiTraceContext(String requestId, String traceId, String rootSpanId, String currentSpanId,
+                           String parentSpanId,
+                           Long conversationId, Long userId, Long userMessageId, Long assistantMessageId,
+                           long traceStartedNanos, int taskIndex) {
         this.requestId = requestId;
         this.traceId = traceId;
         this.rootSpanId = rootSpanId;
@@ -37,11 +46,19 @@ public final class AiTraceContext {
         this.userMessageId = userMessageId;
         this.assistantMessageId = assistantMessageId;
         this.traceStartedNanos = traceStartedNanos;
+        this.taskIndex = taskIndex;
     }
 
     public AiTraceContext child(String spanId) {
         return new AiTraceContext(requestId, traceId, rootSpanId, spanId, currentSpanId,
-                conversationId, userId, userMessageId, assistantMessageId, traceStartedNanos);
+                conversationId, userId, userMessageId, assistantMessageId, traceStartedNanos, taskIndex);
+    }
+
+    /** Returns a context carrying the current task number without changing the trace identity. */
+    public AiTraceContext withTaskIndex(int taskIndex) {
+        return new AiTraceContext(requestId, traceId, rootSpanId, currentSpanId, parentSpanId,
+                conversationId, userId, userMessageId, assistantMessageId, traceStartedNanos,
+                Math.max(0, taskIndex));
     }
 
     public boolean isValid() {
@@ -86,5 +103,9 @@ public final class AiTraceContext {
 
     public long getTraceStartedNanos() {
         return traceStartedNanos;
+    }
+
+    public int getTaskIndex() {
+        return taskIndex;
     }
 }

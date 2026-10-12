@@ -7,14 +7,20 @@ import com.hmdp.entity.SeckillVoucher;
 import com.hmdp.entity.Shop;
 import com.hmdp.entity.Voucher;
 import com.hmdp.entity.VoucherOrder;
+import com.hmdp.entity.VoucherOrderDispatchTask;
+import com.hmdp.dto.Result;
+import com.hmdp.dto.UserDTO;
 import com.hmdp.mapper.OrderTimeoutTaskMapper;
 import com.hmdp.mapper.ShopMapper;
 import com.hmdp.mapper.VoucherOrderMapper;
+import com.hmdp.mapper.VoucherOrderDispatchTaskMapper;
 import com.hmdp.mq.VoucherOrderConsumer;
 import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherService;
+import com.hmdp.service.IVoucherOrderService;
 import com.hmdp.service.impl.ShopServiceImpl;
 import com.hmdp.utils.SimpleRedisLock;
+import com.hmdp.utils.UserHolder;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -31,6 +37,9 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static com.hmdp.utils.RedisConstants.CACHE_SHOP_KEY;
+import static com.hmdp.utils.RedisConstants.SECKILL_CLOSE_RESERVATION_KEY;
+import static com.hmdp.utils.RedisConstants.SECKILL_ORDER_KEY;
+import static com.hmdp.utils.RedisConstants.SECKILL_RESERVATION_KEY;
 import static com.hmdp.utils.RedisConstants.SECKILL_STOCK_KEY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -70,23 +79,34 @@ class ReliabilityIntegrationTest {
     private VoucherOrderMapper voucherOrderMapper;
     @Resource
     private OrderTimeoutTaskMapper orderTimeoutTaskMapper;
+    @Resource
+    private VoucherOrderDispatchTaskMapper voucherOrderDispatchTaskMapper;
+    @Resource
+    private IVoucherOrderService voucherOrderService;
 
     private Shop originalShop;
     private String originalShopCache;
     private Long temporaryVoucherId;
     private Long temporaryOrderId;
+    private Long temporaryUserId;
 
     @AfterEach
     void cleanUp() {
+        UserHolder.removeUser();
         if (temporaryOrderId != null) {
             orderTimeoutTaskMapper.delete(new QueryWrapper<OrderTimeoutTask>()
                     .eq("order_id", temporaryOrderId));
+            voucherOrderDispatchTaskMapper.delete(new QueryWrapper<VoucherOrderDispatchTask>()
+                    .eq("order_id", temporaryOrderId));
             voucherOrderMapper.deleteById(temporaryOrderId);
+            stringRedisTemplate.delete(SECKILL_RESERVATION_KEY + temporaryOrderId);
+            stringRedisTemplate.delete(SECKILL_CLOSE_RESERVATION_KEY + temporaryOrderId);
         }
         if (temporaryVoucherId != null) {
             seckillVoucherService.removeById(temporaryVoucherId);
             voucherService.removeById(temporaryVoucherId);
             stringRedisTemplate.delete(SECKILL_STOCK_KEY + temporaryVoucherId);
+            stringRedisTemplate.delete(SECKILL_ORDER_KEY + temporaryVoucherId);
         }
         if (originalShop != null) {
             shopMapper.updateById(originalShop);
@@ -191,6 +211,59 @@ class ReliabilityIntegrationTest {
                 .eq("order_id", temporaryOrderId)).longValue());
         assertEquals(0, seckillVoucherService.getById(temporaryVoucherId).getStock().intValue());
         assertEquals("1", stringRedisTemplate.opsForValue().get(SECKILL_STOCK_KEY + temporaryVoucherId));
+    }
+
+    @Test
+    void shouldPersistDispatchOutboxBeforeMqDelivery() {
+        createTemporarySeckillVoucher();
+        temporaryUserId = 9_100_000_000L + (System.nanoTime() % 1_000_000L);
+        UserDTO user = new UserDTO();
+        user.setId(temporaryUserId);
+        UserHolder.saveUser(user);
+
+        Result result = voucherOrderService.seckillVoucher(temporaryVoucherId);
+
+        assertTrue(result.getSuccess(), result.getErrorMsg());
+        temporaryOrderId = (Long) result.getData();
+        VoucherOrderDispatchTask dispatchTask = voucherOrderDispatchTaskMapper.selectOne(
+                new QueryWrapper<VoucherOrderDispatchTask>().eq("order_id", temporaryOrderId));
+        assertNotNull(dispatchTask);
+        assertEquals(VoucherOrderDispatchTask.STATUS_PENDING, dispatchTask.getStatus());
+        assertEquals(temporaryUserId, dispatchTask.getUserId());
+        assertEquals(temporaryVoucherId, dispatchTask.getVoucherId());
+        assertEquals(0L, voucherOrderMapper.selectCount(new QueryWrapper<VoucherOrder>()
+                .eq("id", temporaryOrderId)).longValue());
+        assertEquals("0", stringRedisTemplate.opsForValue().get(SECKILL_STOCK_KEY + temporaryVoucherId));
+        assertTrue(Boolean.TRUE.equals(stringRedisTemplate.hasKey(SECKILL_RESERVATION_KEY + temporaryOrderId)));
+    }
+
+    @Test
+    void shouldReleaseRedisStockOnlyAfterCommittedTimeoutCancellation() {
+        createTemporarySeckillVoucher();
+        temporaryOrderId = System.currentTimeMillis() * 1_000L + (System.nanoTime() % 1_000L);
+        temporaryUserId = 9_200_000_000L + (System.nanoTime() % 1_000_000L);
+
+        SeckillVoucher seckillVoucher = seckillVoucherService.getById(temporaryVoucherId);
+        seckillVoucher.setStock(0);
+        assertTrue(seckillVoucherService.updateById(seckillVoucher));
+        stringRedisTemplate.opsForValue().set(SECKILL_STOCK_KEY + temporaryVoucherId, "0");
+
+        VoucherOrder order = new VoucherOrder();
+        order.setId(temporaryOrderId);
+        order.setUserId(temporaryUserId);
+        order.setVoucherId(temporaryVoucherId);
+        order.setStatus(VoucherOrder.STATUS_UNPAID);
+        assertEquals(1, voucherOrderMapper.insert(order));
+
+        voucherOrderService.closeTimeoutOrder(temporaryOrderId);
+
+        VoucherOrder closedOrder = voucherOrderMapper.selectById(temporaryOrderId);
+        assertEquals(VoucherOrder.STATUS_CANCELLED, closedOrder.getStatus());
+        assertEquals(1, closedOrder.getRedisStockReleased().intValue());
+        assertEquals(1, seckillVoucherService.getById(temporaryVoucherId).getStock().intValue());
+        assertEquals("1", stringRedisTemplate.opsForValue().get(SECKILL_STOCK_KEY + temporaryVoucherId));
+        assertTrue(Boolean.TRUE.equals(stringRedisTemplate.hasKey(
+                SECKILL_CLOSE_RESERVATION_KEY + temporaryOrderId)));
     }
 
     private void saveOriginalShopAndCache() {

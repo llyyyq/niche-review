@@ -3,7 +3,7 @@
 ## 目标
 
 每次 `/ai/conversations/{conversationId}/chat` 请求生成独立的 `requestId` 和
-`traceId`。查询重写、检索、Agent 路由、模型规划、工具调用、最终模型、SSE
+`traceId`。结构化查询计划、实体解析、检索、工具调用、最终模型、SSE
 以及消息持久化都记录为同一 Trace 下的 Span。
 
 `conversationId` 用于业务会话，`traceId` 用于一次调用链。即使同一会话并发
@@ -36,12 +36,15 @@ data:{"requestId":"...","traceId":"...","conversationId":1,"messageId":2}
 CHAT
 ├── SSE_STREAM
 ├── QUERY_PREPROCESS
+│   └── QUERY_REWRITE_MODEL
+├── QUERY_PLAN_RESOLVE
 ├── RETRIEVAL
-│   ├── EMBEDDING
-│   ├── QDRANT_SEARCH
-│   ├── KEYWORD_SEARCH
+│   ├── STRUCTURED_RETRIEVAL
+│   ├── EMBEDDING（仅有主观偏好的任务）
+│   ├── QDRANT_SEARCH（仅有主观偏好的任务）
 │   └── RESULT_MERGE
 ├── AGENT_ROUTE
+│   ├── TOOL_ROUTE（根据已校验 requiredFacts 确定工具）
 │   ├── TOOL_CALL(shopDetail)
 │   ├── TOOL_CALL(voucherQuery)
 │   └── TOOL_CALL(blogSearch)
@@ -67,6 +70,7 @@ CHAT
 - `tb_ai_tool_log.success=0`，且与失败 Span 使用相同 `span_id`。
 - 若其余证据足够，根 Trace 仍为 `SUCCEEDED`；最终回答不得使用失败工具未返回的事实。
 - 若最终模型也失败，根 Trace 为 `FAILED`，`error_stage=FINAL_MODEL`。
+- Embedding 或 Qdrant 失败时，相应 Span 为 `FAILED`；如果 MySQL 结构化候选仍可用，根 Trace 可以成功，但证据中会记录 `semanticDegraded=true`，回答不得宣称候选满足未验证的主观偏好。
 
 ## 后台摘要
 

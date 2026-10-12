@@ -49,32 +49,24 @@ ai:
     dimension: 1024
   query-rewrite:
     enabled: true
-    long-query-threshold-chars: 160
     max-query-chars: 160
-    max-sub-queries: 3
+    max-tasks: 3
+    max-attempts: 2
     context-message-limit: 4
     max-context-chars: 2400
-    max-output-tokens: 256
-    read-timeout-ms: 8000
+    read-timeout-ms: 15000
   knowledge:
     shop-collection: shop_knowledge
     blog-collection: blog_knowledge
-    retrieve-limit: 3
     vector-candidate-limit: 10
+    task-candidate-limit: 5
     rebuild-on-start: false
     incremental-sync-enabled: true
     sync-retry-max-attempts: 5
     sync-retry-base-delay-seconds: 10
     sync-retry-scan-delay-ms: 10000
     sync-processing-timeout-seconds: 120
-    keyword-fallback-enabled: true
     vector-min-score: 0.35
-    keyword-fallback-limit: 3
-  agent:
-    enabled: true
-    max-steps: 1
-    max-tools-per-step: 3
-    fast-path-enabled: true
   memory:
     summary-trigger-message-count: 12
     max-summary-chars: 2400
@@ -84,21 +76,13 @@ ai:
     max-tool-result-chars: 4000
   evaluation:
     enabled: false
-    mode: rag
-    rag-cases-path: docs/project-proof/rag-cases.csv
-    query-rewrite-cases-path: docs/project-proof/query-rewrite-cases.csv
-    query-rewrite-report-path: docs/project-proof/query-rewrite-evaluation.md
-    rag-answer-source-path: docs/project-proof/query-rewrite-cases.csv
-    rag-answer-source-split: TEST
-    rag-answer-expected-case-count: 40
-    rag-answer-cases-path: docs/project-proof/rag-answer-regression.csv
-    rag-answer-report-path: docs/project-proof/rag-answer-regression.md
-    # Disabled by default: every fixture is executed through the real chat service and model.
+    # Disabled by default: every case is executed through the real chat service and model.
     conversation-enabled: false
     conversation-user-id:
     conversation-cases-path: docs/project-proof/rag-conversation-holdout.csv
     conversation-cases-split: HOLDOUT
     conversation-expected-case-count: 40
+    # Metrics reruns must not overwrite the manually reviewed historical evidence.
     conversation-output-path: docs/project-proof/rag-conversation-holdout-result.csv
     conversation-report-path: docs/project-proof/rag-conversation-holdout-report.md
     conversation-title-prefix: "[E2E-EVAL]"

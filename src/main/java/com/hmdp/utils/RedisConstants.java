@@ -20,11 +20,11 @@ public class RedisConstants {
     public static final String SECKILL_STOCK_KEY = "seckill:stock:";
     public static final String SECKILL_ORDER_KEY = "seckill:order:";
     /**
-     * One short-lived marker for every successful Redis reservation. It lets
-     * compensation distinguish this order's reservation from an older order
-     * made by the same user for the same voucher.
+     * One marker for every successful Redis reservation. It is removed after
+     * MySQL order creation commits or after compensation completes.
      */
     public static final String SECKILL_RESERVATION_KEY = "seckill:reservation:";
+    public static final String SECKILL_CLOSE_RESERVATION_KEY = "seckill:close:reservation:";
     public static final String BLOG_LIKED_KEY = "blog:liked:";
     public static final String FEED_KEY = "feed:";
     public static final String SHOP_GEO_KEY = "shop:geo:";

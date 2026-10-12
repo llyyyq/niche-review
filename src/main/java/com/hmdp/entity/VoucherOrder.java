@@ -62,6 +62,9 @@ public class VoucherOrder implements Serializable {
      */
     private Integer status;
 
+    /** Durable completion marker for the post-commit Redis stock release. */
+    private Integer redisStockReleased;
+
     /**
      * 下单时间
      */

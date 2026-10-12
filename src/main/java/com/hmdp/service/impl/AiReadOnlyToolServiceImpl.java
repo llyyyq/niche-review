@@ -2,10 +2,12 @@ package com.hmdp.service.impl;
 
 import cn.hutool.core.util.StrUtil;
 import com.hmdp.ai.AiToolExecution;
+import com.hmdp.ai.AiToolQueryScope;
 import com.hmdp.ai.AiTraceContext;
 import com.hmdp.ai.AiTraceIds;
 import com.hmdp.ai.AiTraceSpanScope;
 import com.hmdp.ai.ShopKnowledge;
+import com.hmdp.config.AiKnowledgeProperties;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.AiToolLog;
 import com.hmdp.entity.Blog;
@@ -36,8 +38,12 @@ import java.util.stream.Collectors;
 @Service
 public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
 
-    private static final int MAX_CANDIDATE_SHOPS = 3;
     private static final int MAX_BLOG_RESULTS = 6;
+    private static final String NO_CANDIDATE_REASON =
+            "Not queried: this task has no candidate stores. Do not infer that no matching data exists.";
+    private static final String NO_TYPE_REASON =
+            "Not queried: no store category was available for the nearby search. "
+                    + "Do not infer that no nearby store exists.";
     private static final List<String> SUPPORTED_TOOLS = java.util.Arrays.asList(
             "shopDetail", "voucherQuery", "blogSearch", "nearbyShopSearch"
     );
@@ -57,109 +63,170 @@ public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
     @Resource
     private IAiTraceService aiTraceService;
 
-    @Override
-    public List<AiToolExecution> executeRelevantTools(Long conversationId, Long userId, String question,
-                                                       Double x, Double y, List<ShopKnowledge> retrievedShops) {
-        return executeRelevantTools(null, conversationId, userId, question, x, y, retrievedShops);
-    }
-
-    @Override
-    public List<AiToolExecution> executeRelevantTools(AiTraceContext traceContext,
-                                                       Long conversationId, Long userId, String question,
-                                                       Double x, Double y, List<ShopKnowledge> retrievedShops) {
-        List<String> toolNames = new ArrayList<>();
-        toolNames.add("shopDetail");
-        if (containsVoucherIntent(question)) {
-            toolNames.add("voucherQuery");
-        }
-        if (containsBlogIntent(question)) {
-            toolNames.add("blogSearch");
-        }
-        if (x != null && y != null && containsNearbyIntent(question)) {
-            toolNames.add("nearbyShopSearch");
-        }
-        return executeTools(traceContext, conversationId, userId, toolNames, x, y, retrievedShops);
-    }
-
-    @Override
-    public boolean shouldUseDirectToolRouting(String question, Double x, Double y) {
-        if (StrUtil.isBlank(question)) {
-            return false;
-        }
-        return containsVoucherIntent(question)
-                || containsBlogIntent(question)
-                || (x != null && y != null && containsNearbyIntent(question))
-                || containsExplicitShopIntent(question)
-                || containsShopDetailIntent(question);
-    }
-
-    @Override
-    public List<AiToolExecution> executeTools(Long conversationId, Long userId, List<String> toolNames,
-                                              Double x, Double y, List<ShopKnowledge> retrievedShops) {
-        return executeTools(null, conversationId, userId, toolNames, x, y, retrievedShops);
-    }
+    @Resource
+    private AiKnowledgeProperties knowledgeProperties;
 
     @Override
     public List<AiToolExecution> executeTools(AiTraceContext traceContext,
-                                              Long conversationId, Long userId, List<String> toolNames,
-                                              Double x, Double y, List<ShopKnowledge> retrievedShops) {
+                                               Long conversationId, Long userId, List<String> toolNames,
+                                               Double x, Double y, AiToolQueryScope scope,
+                                               List<ShopKnowledge> retrievedShops) {
         if (toolNames == null || toolNames.isEmpty()) {
             return Collections.emptyList();
         }
-        List<Long> shopIds = candidateShopIds(retrievedShops);
+        List<Long> shopIds;
+        RuntimeException candidateResolutionError = null;
+        try {
+            shopIds = candidateShopIds(scope, retrievedShops);
+        } catch (RuntimeException e) {
+            shopIds = Collections.emptyList();
+            candidateResolutionError = e;
+        }
+        final List<Long> resolvedShopIds = shopIds;
         List<AiToolExecution> executions = new ArrayList<>();
         for (String toolName : new LinkedHashSet<>(toolNames)) {
             if (!SUPPORTED_TOOLS.contains(toolName)) {
                 continue;
             }
-            if ("shopDetail".equals(toolName) && !shopIds.isEmpty()) {
+            if (candidateResolutionError != null && requiresShopCandidates(toolName)) {
+                final RuntimeException failure = candidateResolutionError;
                 addIfPresent(executions, invoke(traceContext, conversationId, userId, toolName,
-                        "shopIds=" + shopIds, () -> queryShopDetails(shopIds)));
+                        "candidateResolutionFailed=true", () -> {
+                            throw failure;
+                        }));
+                continue;
             }
-            if ("voucherQuery".equals(toolName) && !shopIds.isEmpty()) {
+            if (requiresShopCandidates(toolName) && resolvedShopIds.isEmpty()) {
+                executions.add(AiToolExecution.skipped(toolName, NO_CANDIDATE_REASON));
+                continue;
+            }
+            if ("shopDetail".equals(toolName)) {
                 addIfPresent(executions, invoke(traceContext, conversationId, userId, toolName,
-                        "shopIds=" + shopIds, () -> queryCurrentVouchers(shopIds)));
+                        "shopIds=" + resolvedShopIds, () -> queryShopDetails(resolvedShopIds)));
             }
-            if ("blogSearch".equals(toolName) && !shopIds.isEmpty()) {
+            if ("voucherQuery".equals(toolName)) {
                 addIfPresent(executions, invoke(traceContext, conversationId, userId, toolName,
-                        "shopIds=" + shopIds, () -> queryPopularBlogs(shopIds)));
+                        "shopIds=" + resolvedShopIds, () -> queryCurrentVouchers(resolvedShopIds)));
             }
-            if ("nearbyShopSearch".equals(toolName) && x != null && y != null) {
-                Integer typeId = firstCandidateTypeId(retrievedShops);
+            if ("blogSearch".equals(toolName)) {
+                addIfPresent(executions, invoke(traceContext, conversationId, userId, toolName,
+                        "shopIds=" + resolvedShopIds, () -> queryPopularBlogs(resolvedShopIds)));
+            }
+            if ("nearbyShopSearch".equals(toolName) && hasValidLocation(x, y)) {
+                Integer typeId = firstCandidateTypeId(
+                        scope == null ? Collections.<Long>emptyList() : scope.getTypeIds(), retrievedShops);
                 if (typeId != null) {
                     addIfPresent(executions, invoke(traceContext, conversationId, userId, toolName,
                             "typeId=" + typeId + ",locationProvided=true",
-                            () -> queryNearbyShops(typeId, x, y)));
+                            () -> queryNearbyShops(typeId, x, y, scope)));
+                } else {
+                    executions.add(AiToolExecution.skipped(toolName, NO_TYPE_REASON));
                 }
             }
         }
         return executions;
     }
 
-    @Override
-    public List<String> supportedToolNames() {
-        return SUPPORTED_TOOLS;
-    }
-
-    private List<Long> candidateShopIds(List<ShopKnowledge> retrievedShops) {
-        if (retrievedShops == null || retrievedShops.isEmpty()) {
-            return Collections.emptyList();
-        }
+    private List<Long> candidateShopIds(AiToolQueryScope scope, List<ShopKnowledge> retrievedShops) {
         Set<Long> ids = new LinkedHashSet<>();
+        AiToolQueryScope safeScope = scope == null
+                ? new AiToolQueryScope(Collections.<Long>emptyList(), Collections.<Long>emptyList(),
+                Collections.<Long>emptyList(), Collections.<String>emptyList(), null) : scope;
+        if (!safeScope.getShopIds().isEmpty()) {
+            List<Shop> resolved = shopService.listByIds(safeScope.getShopIds());
+            if (resolved != null) {
+                for (Shop shop : resolved) {
+                    if (shop != null && matchesScope(shop, safeScope)) {
+                        ids.add(shop.getId());
+                    }
+                    if (ids.size() >= taskCandidateLimit()) {
+                        break;
+                    }
+                }
+            }
+            // A resolved shop name is a hard condition. Never append a semantic
+            // candidate when that named store failed the same task constraints.
+            return new ArrayList<>(ids);
+        }
+        if (retrievedShops == null || retrievedShops.isEmpty()) {
+            return new ArrayList<>(ids);
+        }
         for (ShopKnowledge shop : retrievedShops) {
-            if (shop.getShopId() != null) {
+            if (shop != null && shop.getShopId() != null && matchesScope(shop, safeScope)) {
                 ids.add(shop.getShopId());
             }
-            if (ids.size() == MAX_CANDIDATE_SHOPS) {
+            if (ids.size() >= taskCandidateLimit()) {
                 break;
             }
         }
         return new ArrayList<>(ids);
     }
 
+    private boolean requiresShopCandidates(String toolName) {
+        return "shopDetail".equals(toolName) || "voucherQuery".equals(toolName)
+                || "blogSearch".equals(toolName);
+    }
+
+    private boolean matchesScope(Shop shop, AiToolQueryScope scope) {
+        if (scope.getExcludedShopIds().contains(shop.getId())) {
+            return false;
+        }
+        if (!scope.getTypeIds().isEmpty()
+                && (shop.getTypeId() == null || !scope.getTypeIds().contains(shop.getTypeId()))) {
+            return false;
+        }
+        if (!scope.getAreas().isEmpty()
+                && (shop.getArea() == null || !scope.getAreas().contains(shop.getArea()))) {
+            return false;
+        }
+        return scope.getMaxAveragePrice() == null
+                || (shop.getAvgPrice() != null && shop.getAvgPrice() <= scope.getMaxAveragePrice());
+    }
+
+    private boolean matchesScope(ShopKnowledge knowledge, AiToolQueryScope scope) {
+        if (knowledge == null || knowledge.getShopId() == null
+                || scope.getExcludedShopIds().contains(knowledge.getShopId())) {
+            return false;
+        }
+        Map<String, Object> payload = knowledge.getPayload();
+        if (!scope.getTypeIds().isEmpty()
+                && (payload == null || !scope.getTypeIds().contains(asLong(payload.get("typeId"))))) {
+            return false;
+        }
+        if (!scope.getAreas().isEmpty()
+                && (payload == null || !scope.getAreas().contains(String.valueOf(payload.get("area"))))) {
+            return false;
+        }
+        if (scope.getMaxAveragePrice() != null) {
+            Long averagePrice = payload == null ? null : asLong(payload.get("avgPrice"));
+            if (averagePrice == null || averagePrice > scope.getMaxAveragePrice()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private Long asLong(Object value) {
+        if (value instanceof Number) {
+            return ((Number) value).longValue();
+        }
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Long.valueOf(String.valueOf(value));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
     private String queryShopDetails(List<Long> shopIds) {
         Map<Long, Shop> shopsById = new HashMap<>();
-        for (Shop shop : shopService.listByIds(shopIds)) {
+        List<Shop> loadedShops = shopService.listByIds(shopIds);
+        if (loadedShops == null) {
+            loadedShops = Collections.emptyList();
+        }
+        for (Shop shop : loadedShops) {
             shopsById.put(shop.getId(), shop);
         }
         StringBuilder result = new StringBuilder("Live store details:\n");
@@ -169,13 +236,19 @@ public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
                 result.append("- ").append(formatShop(shop)).append('\n');
             }
         }
-        return result.toString();
+        return result.length() == "Live store details:\n".length()
+                ? "Live store details: no current store was found for the resolved candidates."
+                : result.toString();
     }
 
     private String queryCurrentVouchers(List<Long> shopIds) {
         Set<Long> shopIdSet = new LinkedHashSet<>(shopIds);
         LocalDateTime now = LocalDateTime.now();
-        List<Voucher> vouchers = voucherService.listEnabledVouchersForKnowledge().stream()
+        List<Voucher> enabledVouchers = voucherService.listEnabledVouchersForKnowledge(shopIds);
+        if (enabledVouchers == null) {
+            enabledVouchers = Collections.emptyList();
+        }
+        List<Voucher> vouchers = enabledVouchers.stream()
                 .filter(voucher -> shopIdSet.contains(voucher.getShopId()))
                 .filter(voucher -> isAvailableNow(voucher, now))
                 .collect(Collectors.toList());
@@ -207,6 +280,9 @@ public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
                 .orderByDesc("liked")
                 .last("LIMIT " + MAX_BLOG_RESULTS)
                 .list();
+        if (blogs == null) {
+            blogs = Collections.emptyList();
+        }
         if (blogs.isEmpty()) {
             return "Live blog query: no public blog was found for the candidate stores.";
         }
@@ -226,9 +302,9 @@ public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
     }
 
     @SuppressWarnings("unchecked")
-    private String queryNearbyShops(Integer typeId, Double x, Double y) {
+    private String queryNearbyShops(Integer typeId, Double x, Double y, AiToolQueryScope scope) {
         Result result = shopService.queryShopByType(typeId, 1, x, y);
-        if (!(result.getData() instanceof List)) {
+        if (result == null || !(result.getData() instanceof List)) {
             return "Live nearby-store query: no indexed store was found within the current 50 km search range. The browser location was received successfully.";
         }
         List<?> values = (List<?>) result.getData();
@@ -241,9 +317,17 @@ public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
             if (!(value instanceof Shop)) {
                 continue;
             }
-            text.append("- ").append(formatShop((Shop) value)).append('\n');
+            Shop shop = (Shop) value;
+            if (scope != null && !matchesScope(shop, scope)) {
+                continue;
+            }
+            if (scope != null && !scope.getShopIds().isEmpty()
+                    && !scope.getShopIds().contains(shop.getId())) {
+                continue;
+            }
+            text.append("- ").append(formatShop(shop)).append('\n');
             count++;
-            if (count == MAX_CANDIDATE_SHOPS) {
+            if (count >= taskCandidateLimit()) {
                 break;
             }
         }
@@ -252,11 +336,19 @@ public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
                 : text.toString();
     }
 
-    private Integer firstCandidateTypeId(List<ShopKnowledge> retrievedShops) {
+    private Integer firstCandidateTypeId(List<Long> explicitTypeIds, List<ShopKnowledge> retrievedShops) {
+        if (explicitTypeIds != null) {
+            for (Long typeId : explicitTypeIds) {
+                if (typeId != null) {
+                    return typeId.intValue();
+                }
+            }
+        }
         if (retrievedShops == null || retrievedShops.isEmpty()) {
             return null;
         }
-        Object value = retrievedShops.get(0).getPayload().get("typeId");
+        Map<String, Object> payload = retrievedShops.get(0).getPayload();
+        Object value = payload == null ? null : payload.get("typeId");
         if (value instanceof Number) {
             return ((Number) value).intValue();
         }
@@ -267,6 +359,17 @@ public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
         }
     }
 
+    private int taskCandidateLimit() {
+        Integer configured = knowledgeProperties == null ? null : knowledgeProperties.getTaskCandidateLimit();
+        return configured == null || configured <= 0 ? 5 : configured;
+    }
+
+    private boolean hasValidLocation(Double x, Double y) {
+        return x != null && y != null
+                && x >= -180D && x <= 180D
+                && y >= -90D && y <= 90D;
+    }
+
     private AiToolExecution invoke(AiTraceContext traceContext,
                                    Long conversationId, Long userId, String toolName,
                                    String requestContent, ToolSupplier supplier) {
@@ -274,6 +377,9 @@ public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
         Map<String, Object> spanAttributes = new HashMap<>();
         spanAttributes.put("toolName", toolName);
         spanAttributes.put("toolCallId", toolCallId);
+        if (traceContext != null && traceContext.getTaskIndex() > 0) {
+            spanAttributes.put("taskIndex", traceContext.getTaskIndex());
+        }
         AiTraceSpanScope toolSpan = traceContext == null || aiTraceService == null
                 ? null : aiTraceService.startSpan(traceContext, "TOOL_CALL", spanAttributes);
         AiTraceContext toolContext = toolSpan == null ? traceContext : toolSpan.getContext();
@@ -296,7 +402,14 @@ public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
                 toolSpan.failure(e);
             }
             saveLog(toolContext, toolCallId, conversationId, userId, toolName, requestContent, error, 0, duration);
-            return null;
+            // Keep the failure in the evidence stream. Returning no execution makes
+            // the final model unable to distinguish "no live data was requested"
+            // from "live data was requested but unavailable", so it may fall back
+            // to stale vector knowledge for a time-sensitive fact.
+            return new AiToolExecution(toolName,
+                    "Live business data is temporarily unavailable for this request. "
+                            + "Do not infer time-sensitive facts from the unavailable tool result.",
+                    false);
         }
     }
 
@@ -330,43 +443,6 @@ public class AiReadOnlyToolServiceImpl implements IAiReadOnlyToolService {
         if (execution != null) {
             executions.add(execution);
         }
-    }
-
-    private boolean containsVoucherIntent(String question) {
-        return containsAny(question, "coupon", "voucher", "discount", "deal", "\u4f18\u60e0", "\u4ee3\u91d1", "\u5238", "\u62a2", "\u79d2\u6740");
-    }
-
-    private boolean containsBlogIntent(String question) {
-        return containsAny(question, "blog", "review", "note", "\u7b14\u8bb0", "\u535a\u5ba2", "\u63a2\u5e97", "\u8bc4\u4ef7", "\u53e3\u7891", "\u8bc4\u8bba");
-    }
-
-    private boolean containsNearbyIntent(String question) {
-        return containsAny(question, "nearby", "near me", "distance", "\u9644\u8fd1", "\u8ddd\u79bb", "\u5468\u8fb9", "\u8fd1");
-    }
-
-    private boolean containsExplicitShopIntent(String question) {
-        return question.matches("(?s).*?(?:shop|store|\u5e97\u94fa|\u5546\u5bb6|\u9910\u5385|\u5e97)\\s*#?\\d+.*");
-    }
-
-    private boolean containsShopDetailIntent(String question) {
-        return containsAny(question, "shop detail", "opening hours", "address", "average spend", "rating",
-                "\u5e97\u94fa\u8be6\u60c5", "\u8425\u4e1a\u65f6\u95f4", "\u8425\u4e1a\u5230",
-                "\u51e0\u70b9\u5173\u95e8", "\u4ec0\u4e48\u65f6\u5019\u5173\u95e8", "\u5f00\u5230\u51e0\u70b9",
-                "\u6253\u70ca", "\u5468\u672b\u8425\u4e1a", "\u5468\u672b\u5f00\u95e8", "\u4eca\u5929\u8425\u4e1a",
-                "\u662f\u5426\u8425\u4e1a", "\u8425\u4e1a\u5417", "\u5f00\u7740\u5417", "\u5730\u5740", "\u4eba\u5747", "\u8bc4\u5206");
-    }
-
-    private boolean containsAny(String value, String... keywords) {
-        if (StrUtil.isBlank(value)) {
-            return false;
-        }
-        String lowercase = value.toLowerCase();
-        for (String keyword : keywords) {
-            if (lowercase.contains(keyword)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private boolean isAvailableNow(Voucher voucher, LocalDateTime now) {

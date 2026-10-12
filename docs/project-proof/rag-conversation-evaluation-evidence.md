@@ -1,4 +1,6 @@
-# 会话级端到端 RAG 评测证据
+# 固定40条会话级 Agent/RAG 评测证据
+
+> 本页用于说明评测资产和复现方法。`rag-conversation-holdout.csv` 是项目已有的固定40条回归/演示集，不是盲测集；运行结果由当前版本的会话评测器生成，不能把历史运行数字直接当作当前版本结论。
 
 本评测通过现有 `IAiConversationService.chat()` 运行，不调用私有检索方法，也不向数据库预写助手回答。每个案例均创建独立会话，后续轮次读取同一会话中前一轮真实生成并持久化的助手消息。
 
@@ -16,18 +18,20 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| [rag-conversation-holdout.csv](rag-conversation-holdout.csv) | 冻结的 40 条会话级留出集，包含短问题、指代、长输入、多意图、继承约束和应澄清问题。 |
+| [rag-conversation-holdout.csv](rag-conversation-holdout.csv) | 固定的 40 条会话级案例，包含短问题、指代、长输入、多意图、继承约束和应澄清问题。 |
 | [rag-conversation-evaluation.md](rag-conversation-evaluation.md) | 评测入口、执行边界和人工复核字段说明。 |
-| [rag-conversation-holdout-result.csv](rag-conversation-holdout-result.csv) | 2026-08-04 首次完整运行的原始 40 条结果。 |
+| [rag-conversation-holdout-result.csv](rag-conversation-holdout-result.csv) | 当前评测器运行后生成的 UTF-8 BOM 结果文件，包含 Trace、检索、工具和人工复核字段。 |
 | [rag-conversation-holdout-result-excel.csv](rag-conversation-holdout-result-excel.csv) | 与原始结果内容一致、带 UTF-8 BOM 的 Excel 复核副本。 |
-| [rag-conversation-holdout-report.md](rag-conversation-holdout-report.md) | 首次运行的自动执行指标。 |
+| [rag-conversation-holdout-report.md](rag-conversation-holdout-report.md) | 当前评测器运行后生成的自动指标报告。 |
 | [rag-conversation-holdout-result-retry.csv](rag-conversation-holdout-result-retry.csv) | 最近一次单案例重跑结果。 |
 | [rag-conversation-holdout-report-retry.md](rag-conversation-holdout-report-retry.md) | 最近一次单案例重跑的自动指标。 |
 | [ai-agent-trace-export.sql](ai-agent-trace-export.sql) | 输入 `traceId` 后导出根 Trace、Span、模型日志和工具日志。 |
 
 `*-retry.*` 文件是运行器的当前重跑输出，会被下一次重跑覆盖。需要长期保存一次重跑证据时，应在下一次运行前复制并使用带日期或案例 ID 的文件名归档。
 
-## 本次执行记录
+## 历史运行记录（仅存档）
+
+以下内容保留用于解释早期评测过程，数字对应旧运行环境或旧版本链路，不能作为当前版本的最终指标。当前版本请以运行器重新生成的 CSV 和报告为准。
 
 首次完整运行共执行 40 条案例：40 条会话都完成结束，34 条根 Trace 为 `SUCCEEDED`；另外 6 条在 `FINAL_MODEL` 阶段受到上游模型服务 `HTTP 503` 影响。该错误归因为基础依赖，不归因为 Qdrant 检索、关键词 fallback 或工具调用。
 
@@ -66,10 +70,12 @@
 ```text
 CHAT
 ├── QUERY_PREPROCESS
+│   └── QUERY_REWRITE_MODEL
+├── QUERY_PLAN_RESOLVE
 ├── RETRIEVAL
-│   ├── EMBEDDING
-│   ├── QDRANT_SEARCH
-│   ├── KEYWORD_SEARCH
+│   ├── STRUCTURED_RETRIEVAL
+│   ├── EMBEDDING（仅主观偏好任务）
+│   ├── QDRANT_SEARCH（仅主观偏好任务）
 │   └── RESULT_MERGE
 ├── AGENT_ROUTE
 │   └── TOOL_CALL × N
@@ -90,7 +96,7 @@ CHAT
 
 评测结论应分开表述：自动指标证明链路执行与工具路由；人工复核才用于判断最终答案忠实度和约束遵守情况。
 
-## 最终人工复核结果
+## 历史人工复核结果（仅存档）
 
 40 条案例完成端到端运行和人工复核，其中 37 条最终答案通过，正确率为 `92.5%`。
 

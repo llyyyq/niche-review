@@ -1,62 +1,17 @@
-# Phase 7: Hybrid Retrieval and Bounded Think-Execute Agent
+# Phase 7 Historical Retrieval Design
 
-## Hybrid Retrieval
+> This document records the retired first-generation RAG design. It is not the current production workflow.
 
-`ShopKnowledgeServiceImpl.searchRelevantShops()` now uses this order:
+The historical version embedded the user query directly, searched Qdrant, and used a local keyword fallback when vector recall was empty or below a score threshold. It also used a bounded model-based tool-planning loop with deterministic fast paths.
 
-1. Query Qdrant using the question embedding.
-2. When the vector result is empty or the best score is below `ai.knowledge.vector-min-score`, run a keyword fallback over store name, category, business area, and address.
-3. Merge keyword matches with vector matches by store ID and keep the configured retrieval limit.
+This design was replaced because the keyword rules reparsed raw natural language independently from the model, mixed hard business conditions with semantic ranking, and made multi-task condition ownership difficult to verify.
 
-The keyword fallback is intentionally local and deterministic. It lets exact queries such as a store name, `KTV`, or a business area still work during weak vector recall or a temporary embedding/Qdrant failure.
+The current workflow is documented in [README.md](../README.md#结构化-rag-检索):
 
-## Think-Execute Loop
+1. The model produces a strict task-scoped query plan for every non-empty request.
+2. Java validates the plan and resolves names into database identifiers.
+3. MySQL applies explicit store, exclusion, category, area, and budget conditions.
+4. Embedding and Qdrant run only when a task contains subjective semantic preferences.
+5. Tools are selected from the validated `requiredFacts` field and executed per task.
 
-`AiAgentRunner` introduces a bounded agent loop:
-
-1. The model receives the user question and currently available tool names.
-2. It returns strict JSON indicating either `tool` with tool names, or `final`.
-3. The application checks the tool allowlist and executes requested tools.
-4. The model can plan another step with the live tool results available in context.
-5. The loop stops on `final`, no executable tool, a planner failure, or `ai.agent.max-steps`.
-
-Planner failures safely fall back to the previous keyword tool routing. Tool failures are isolated and logged; they do not fail the entire chat response.
-
-## Fast Path for Chat Latency
-
-Calling a model just to decide whether to invoke an obvious read-only tool adds several seconds of latency. With `ai.agent.fast-path-enabled: true`, the application now uses deterministic routing before the planner:
-
-1. Questions mentioning vouchers, public blogs, an explicit shop number, shop details, or nearby stores with browser coordinates call the existing allowlisted tools directly.
-2. Normal chat and knowledge-only questions skip tool planning and go straight to the final answer model.
-3. Only ambiguous recommendation, comparison, budget, dating, or group-dining questions use the model planner.
-
-The default `max-steps` is `1`, so a complex question can add at most one planning model round trip. Set `fast-path-enabled: false` only when you need to compare the complete planner behavior.
-
-## External Tool Extension
-
-`AiExternalToolProvider` and `AiToolInvocation` are extension points. A future MCP Client adapter can implement `AiExternalToolProvider`, publish discovered tool names, and execute MCP calls without changing `AiAgentRunner`.
-
-This project does not add Spring AI or an MCP dependency yet. The current application uses Spring Boot 2.3 and Java 8, while current Spring AI requires a modern Spring Boot/JDK baseline. The extension seam keeps the current project stable while preserving a clean migration path.
-
-## Configuration
-
-```yaml
-ai:
-  knowledge:
-    keyword-fallback-enabled: true
-    vector-min-score: 0.35
-    keyword-fallback-limit: 3
-  agent:
-    enabled: true
-    max-steps: 1
-    max-tools-per-step: 3
-    fast-path-enabled: true
-```
-
-## Verification
-
-1. Restart the backend with the existing chat, embedding, and Qdrant configuration.
-2. Ask a store-specific question such as `店铺 10 有什么优惠券和探店笔记？`.
-3. Check `tb_ai_tool_log` for `shopDetail`, `voucherQuery`, and/or `blogSearch` records.
-4. To force a keyword-fallback test temporarily, set `AI_KNOWLEDGE_VECTOR_MIN_SCORE=1`, restart, and ask an exact store-name or category question. The log should contain `Keyword fallback supplemented vector retrieval`.
-5. Remove the temporary score override after the test.
+Historical evaluation outputs remain under `docs/project-proof/archive/` for regression context. They must not be presented as current production metrics.

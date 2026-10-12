@@ -2,6 +2,7 @@ package com.hmdp.service.impl;
 
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.hmdp.ai.AiChatModelClient;
 import com.hmdp.ai.AiPromptMessage;
 import com.hmdp.ai.AiTokenEstimator;
@@ -60,6 +61,11 @@ public class AiConversationMemoryServiceImpl implements IAiConversationMemorySer
 
     @Override
     public void summarizeIfNeeded(AiTraceContext traceContext, Long conversationId, Long userId) {
+        if (isMockProvider()) {
+            // The mock model returns canned text. Persisting it would replace real conversation memory.
+            completeTrace(traceContext, "NO_ACTION");
+            return;
+        }
         long startedAt = System.currentTimeMillis();
         AtomicLong firstTokenMs = new AtomicLong(-1L);
         int inputTokens = 0;
@@ -112,12 +118,14 @@ public class AiConversationMemoryServiceImpl implements IAiConversationMemorySer
                 throw new IllegalStateException("AI summary model returned an empty response");
             }
             AiMessage lastSummarized = messagesToSummarize.get(messagesToSummarize.size() - 1);
-            conversation.setSummary(summary);
-            conversation.setSummaryUpToMessageId(lastSummarized.getId());
-            aiConversationMapper.updateById(conversation);
             saveRequestLog(logContext, conversationId, userId, "summary", null, 0L, 0L,
                     firstTokenMs.get(), System.currentTimeMillis() - modelStartedAt,
                     inputTokens, aiTokenEstimator.estimateText(summary), 1, null);
+            if (!updateSummaryIfWatermarkUnchanged(conversation, summary, lastSummarized.getId())) {
+                log.info("AI conversation summary superseded by a concurrent job, conversationId={}", conversationId);
+                completeTrace(traceContext, "SUPERSEDED");
+                return;
+            }
             log.info("AI conversation summary updated, conversationId={}, summaryUpToMessageId={}",
                     conversationId, lastSummarized.getId());
             completeTrace(traceContext, "SUMMARIZED");
@@ -130,6 +138,30 @@ public class AiConversationMemoryServiceImpl implements IAiConversationMemorySer
                 aiTraceService.failTrace(traceContext, "SUMMARY_MODEL", e);
             }
         }
+    }
+
+    /**
+     * Writes only the summary fields, guarded by the watermark read when this job started.
+     * A whole-row update could roll back a title renamed while the summary was generating.
+     */
+    private boolean updateSummaryIfWatermarkUnchanged(AiConversation conversation, String summary,
+                                                      Long summaryUpToMessageId) {
+        UpdateWrapper<AiConversation> wrapper = new UpdateWrapper<AiConversation>()
+                .eq("id", conversation.getId())
+                .eq("user_id", conversation.getUserId())
+                .set("summary", summary)
+                .set("summary_up_to_message_id", summaryUpToMessageId);
+        Long previousWatermark = conversation.getSummaryUpToMessageId();
+        if (previousWatermark == null) {
+            wrapper.isNull("summary_up_to_message_id");
+        } else {
+            wrapper.eq("summary_up_to_message_id", previousWatermark);
+        }
+        return aiConversationMapper.update(null, wrapper) == 1;
+    }
+
+    private boolean isMockProvider() {
+        return "mock".equalsIgnoreCase(aiChatProperties.getProvider());
     }
 
     private List<AiMessage> findUnsummarizedMessages(Long conversationId, Long userId, Long summaryUpToMessageId) {

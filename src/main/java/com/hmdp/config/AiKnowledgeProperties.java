@@ -12,10 +12,11 @@ public class AiKnowledgeProperties {
     /** One public-review document per point; kept separate from the stable shop profile. */
     private String blogCollection = "blog_knowledge";
 
-    private Integer retrieveLimit = 3;
-
-    /** Fetch a wider candidate set before applying hard business constraints and returning Top3. */
+    /** Per collection oversampling before payload filtering and shop-level deduplication. */
     private Integer vectorCandidateLimit = 10;
+
+    /** Maximum evidence candidates retained for each independent query task. */
+    private Integer taskCandidateLimit = 5;
 
     private Boolean rebuildOnStart = false;
 
@@ -29,9 +30,5 @@ public class AiKnowledgeProperties {
 
     private Long syncProcessingTimeoutSeconds = 120L;
 
-    private Boolean keywordFallbackEnabled = true;
-
     private Double vectorMinScore = 0.35D;
-
-    private Integer keywordFallbackLimit = 3;
 }

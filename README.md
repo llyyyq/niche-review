@@ -74,8 +74,8 @@ mvn spring-boot:run -Dspring-boot.run.profiles=local
 # 缓存、消息幂等、DLQ 和超时关单集成测试
 mvn -q -Dtest=ReliabilityIntegrationTest test
 
-# AI Trace、查询预处理、检索与工具隔离测试
-mvn -q -Dtest="AiTraceCoreTest,AiReadOnlyToolTraceTest,AiQueryPreprocessorTest,AiConversationQueryRewriteTest,ShopKnowledgeServiceImplTest" test
+# AI Trace、结构化查询计划、检索与工具隔离测试
+mvn -q -Dtest="AiTraceCoreTest,AiQueryPlanPlannerTest,AiQueryPlanResolverTest,AiConversationQueryRewriteTest,ShopKnowledgeStructuredRetrievalTest,AiAgentStructuredRoutingTest,AiReadOnlyToolTraceTest,AiConversationEvidenceBudgetTest" test
 
 # 生成 JMeter 10,000 个用户 Token
 mvn -q -Dtest=HmDianPingApplicationTests#prepareJmeterTokens test
@@ -182,39 +182,45 @@ flowchart TD
 
 [↑ 回到导航](#nav)
 
-### 混合 RAG 检索
+### 结构化 RAG 检索
 
-**问题**：用户问题可能包含指代（"第一家怎么样"）、多意图（"推荐火锅同时预算 100"）、长输入；仅靠向量检索在口语化查询上召回不准。
+**问题**：用户问题可能同时包含实体、排除条件、预算、商圈、主观偏好和实时事实需求。直接对原问题做向量检索，无法保证硬条件不被高相似度候选突破，也容易在多任务场景中混用条件。
 
 **方案**：
 
 ```mermaid
 flowchart TD
-    A["用户问题"] --> B["查询预处理"]
-    B -- "需重写的指代/长文本/多意图" --> C["LLM 改写为独立查询"]
-    B -- "多意图" --> D["拆分为 ≤3 条子查询"]
-    B -- "歧义无法消解" --> E["SSE 返回澄清问题，不调用检索与工具"]
-    B -- "短且明确" --> F["直接嵌入"]
-    C --> F
-    D --> F
-    F --> G["Qdrant 向量检索（店铺画像 + 公开探店笔记）"]
-    G --> H["关键词 fallback + 结构化约束（商圈/预算/品类）"]
-    H --> I{"是否有可靠资料？"}
-    I -- "否" --> J["返回'暂无相关信息'，不编造"]
-    I -- "是" --> K["实时工具校验（如有效优惠券） → Chat 流式生成"]
+    A["用户问题 + 最近用户上下文"] --> B["LLM 输出结构化查询计划（最多 3 个任务）"]
+    B -- "无关问题" --> C["跳过检索，说明助手能力边界"]
+    B -- "歧义或明确指定超过 5 家" --> D["SSE 返回澄清问题"]
+    B -- "模型超时/非法 JSON，重试耗尽" --> E["返回服务繁忙"]
+    B -- "READY" --> F["程序逐任务校验并解析店铺/类别/商圈 ID"]
+    F -- "无可执行条件或实体无法解析" --> D
+    F --> G["MySQL 按实体、排除、类别、商圈、预算确定性过滤"]
+    G --> H{"存在主观语义偏好？"}
+    H -- "否" --> I["按评分/评论数/销量/ID 稳定排序，保留最多 5 家"]
+    H -- "是" --> J["Embedding + Qdrant Payload 硬过滤后语义排序，保留最多 5 家"]
+    J -- "语义服务不可用" --> K["保留结构化候选并标记降级，不宣称满足主观偏好"]
+    I --> L["按 requiredFacts 执行只读工具"]
+    J --> L
+    K --> L
+    L --> M["按任务组装证据 → Chat 流式生成"]
 ```
 
-- **改写与检索分离**：改写结果只用于检索，原始问题保留用于对话和工具决策
-- **无证据拒答**：没有业务资料支撑时直接拒答，不依赖模型常识编造
-- **关键词 fallback**：启用 fallback 后执行 MySQL 关键词搜索，并与经过结构化约束的向量结果合并去重；向量相似度阈值 `0.35` 用于判断纯向量结果是否可靠
+- **统一理解入口**：每个非空问题以 OpenAI-Compatible JSON Mode 输出结构化计划；规划器只校验 JSON 字段契约，不再用第二套规则重新解释原问题
+- **职责分层**：Resolver 将模型提供的店名、类别和商圈解析为数据库实体，并执行数量、空查询和实体歧义等执行安全检查；检索阶段执行已解析的结构化条件
+- **硬条件与语义职责分离**：MySQL 负责实体、排除、类别、商圈和预算；Qdrant 只在 `semanticPreference` 非空时负责主观偏好排序
+- **无条件保护**：仅问“有什么优惠券”等没有店铺、类别、商圈、预算或偏好的请求直接澄清，不做全量店铺推荐或工具查询
+- **任务隔离**：当前问题覆盖历史条件，只从最近相关的用户消息继承缺失字段；助手消息仅用于“它、第二家”等实体指代
+- **证据边界**：Qdrant 每集合预取 10 条后按 `shopId` 去重，每任务最多保留 5 家候选，最终回答最多展示 3 家；Payload 过滤不能突破结构化硬条件，候选和工具结果按任务分组、等额分配 Prompt 预算，截断使用 `[truncated]` 标识
 
-**证据**：[会话级端到端评测](docs/project-proof/rag-conversation-evaluation-evidence.md) 40 条冻结多轮用例，真实 `chat()` + SSE + 工具 + Trace 执行，人工复核 **37/40 正确（92.5%）**。3 个失败用例（CE018/CE019/CE038）已记录根因。
+**证据**：结构化计划、任务级约束、语义降级、候选上限和证据预算由定向测试覆盖。旧版关键词 fallback 的评测仅作为历史基线保留；当前结构化工作流需重新运行冻结端到端集后再更新效果数字。
 
 [↑ 回到导航](#nav)
 
 ### 请求级 Trace
 
-**问题**：一次 AI 请求可能经过查询改写 → 向量检索 → Agent 规划 → 工具调用 → 模型生成 → SSE 推送 → 消息持久化 7 个阶段，出问题时无法定位是哪个环节出错。
+**问题**：一次 AI 请求可能经过查询计划 → 结构化检索 → 按需语义排序 → 确定性工具路由 → 模型生成 → SSE 推送 → 消息持久化等阶段，出问题时无法定位是哪个环节出错。
 
 **方案**：
 
@@ -223,9 +229,12 @@ flowchart TD
 ```text
 CHAT
 ├── SSE_STREAM
-├── QUERY_PREPROCESS → QUERY_REWRITE_MODEL
-├── RETRIEVAL → EMBEDDING / QDRANT_SEARCH / KEYWORD_SEARCH / RESULT_MERGE
-├── AGENT_ROUTE → AGENT_PLAN / TOOL_CALL × N
+├── QUERY_PREPROCESS → QUERY_REWRITE_MODEL × N
+├── QUERY_PLAN_RESOLVE
+├── RETRIEVAL → STRUCTURED_RETRIEVAL × N
+│               └── EMBEDDING / QDRANT_SEARCH（仅主观偏好任务）
+│               └── RESULT_MERGE
+├── AGENT_ROUTE → TOOL_ROUTE → TOOL_CALL × N
 ├── FINAL_MODEL
 └── MESSAGE_PERSIST
 ```
@@ -319,7 +328,7 @@ RocketMQ 延迟消息本身没有持久化“这个关单任务已创建”的�
 | 秒杀下单 | [`VoucherOrderServiceImpl`](src/main/java/com/hmdp/service/impl/VoucherOrderServiceImpl.java) · [`VoucherOrderConsumer`](src/main/java/com/hmdp/mq/VoucherOrderConsumer.java) · [`VoucherOrderDeadLetterConsumer`](src/main/java/com/hmdp/mq/VoucherOrderDeadLetterConsumer.java) · [`seckill.lua`](src/main/resources/seckill.lua) · [`seckill_rollback.lua`](src/main/resources/seckill_rollback.lua) |
 | 关单 & 支付 | [`OrderTimeoutTaskServiceImpl`](src/main/java/com/hmdp/service/impl/OrderTimeoutTaskServiceImpl.java) · [`OrderTimeoutListener`](src/main/java/com/hmdp/mq/OrderTimeoutListener.java) · [`PaymentServiceImpl`](src/main/java/com/hmdp/service/impl/PaymentServiceImpl.java) |
 | RAG 检索 | [`ShopKnowledgeServiceImpl`](src/main/java/com/hmdp/service/impl/ShopKnowledgeServiceImpl.java) · [`QdrantKnowledgeClient`](src/main/java/com/hmdp/ai/QdrantKnowledgeClient.java) |
-| 查询预处理 | [`AiQueryPreprocessor`](src/main/java/com/hmdp/ai/AiQueryPreprocessor.java) |
+| 查询计划 | [`AiQueryPlanPlanner`](src/main/java/com/hmdp/ai/AiQueryPlanPlanner.java) · [`AiQueryPlanResolver`](src/main/java/com/hmdp/ai/AiQueryPlanResolver.java) |
 | Agent & 工具 | [`AiAgentRunner`](src/main/java/com/hmdp/ai/AiAgentRunner.java) · [`AiReadOnlyToolServiceImpl`](src/main/java/com/hmdp/service/impl/AiReadOnlyToolServiceImpl.java) |
 | AI 对话 & Trace | [`AiConversationServiceImpl`](src/main/java/com/hmdp/service/impl/AiConversationServiceImpl.java) · [`AiTraceServiceImpl`](src/main/java/com/hmdp/service/impl/AiTraceServiceImpl.java) |
 | 知识同步 | [`AiKnowledgeSyncTaskServiceImpl`](src/main/java/com/hmdp/service/impl/AiKnowledgeSyncTaskServiceImpl.java) · [`ShopKnowledgeChangedListener`](src/main/java/com/hmdp/event/ShopKnowledgeChangedListener.java) |
@@ -336,7 +345,7 @@ RocketMQ 延迟消息本身没有持久化“这个关单任务已创建”的�
 | 秒杀对账 SQL | [`seckill-verify.sql`](docs/project-proof/seckill-verify.sql) | 独立验证 SQL |
 | 可靠性验证 | [`reliability-verification.md`](docs/project-proof/reliability-verification.md) | 3/3 通过 |
 | 支付关单竞争 | [`payment-timeout-race.md`](docs/project-proof/payment-timeout-race.md) | 支付/关单/重复消息全覆盖 |
-| 会话级 RAG 评测 | [`rag-conversation-evaluation-evidence.md`](docs/project-proof/rag-conversation-evaluation-evidence.md) | 37/40（92.5%） |
+| 会话级 Agent/RAG 评测 | [`rag-conversation-evaluation.md`](docs/project-proof/rag-conversation-evaluation.md) | 复用固定40条案例，真实调用 chat()，输出 Trace、检索和工具路由指标 |
 | 知识同步故障恢复 | [`knowledge-sync-failure.md`](docs/project-proof/knowledge-sync-failure.md) | Qdrant 中断 → 重试 → 恢复 |
 | AI Trace 示例 | [`ai-agent-trace.md`](docs/project-proof/ai-agent-trace.md) | 两条真实请求全链路 |
 | Trace 导出 SQL | [`ai-agent-trace-export.sql`](docs/project-proof/ai-agent-trace-export.sql) | 按 traceId 还原调用链 |

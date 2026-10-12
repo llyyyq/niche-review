@@ -1,97 +1,53 @@
-# AI Agent Trace
+# AI Request Trace
 
-本项目采用有限步 Think-Execute 编排，不是多 Agent：只读工具白名单为 `shopDetail`、`voucherQuery`、`blogSearch`、`nearbyShopSearch`；`ai.agent.max-steps=1`，需要复杂工具选择时最多进行一轮规划。对于意图明确的问题，快速路径会直接选择工具，以减少一次额外模型调用。工具异常会被隔离并记录日志，不中断最终 SSE 回答。
+每个 `/ai/conversations/{conversationId}/chat` 请求由服务端生成独立的
+`requestId`、`traceId` 和根 `spanId`。`conversationId` 仅关联业务会话；同一会话的
+多次并发问答也会产生不同 Trace。
 
-## Trace 1：优惠券与探店笔记查询
-
-### 用户问题
-
-`103茶餐厅有什么优惠券和探店笔记？`
-
-### 真实执行记录
-
-执行时间：`2026-07-26 00:28:00`。请求日志 ID：`51`，类型：`chat`，成功状态：`1`。
-
-| 维度 | 实际结果 |
-| --- | --- |
-| RAG 召回耗时 | `346 ms` |
-| 工具编排总耗时 | `65 ms` |
-| 首 Token 耗时 | `5805 ms` |
-| 总耗时 | `7262 ms` |
-| 输入 / 输出 Token | `1558 / 370` |
-| 是否生成 `agent_plan` | 否。问题命中优惠券、探店笔记关键词，走直接工具路由。 |
-| 候选店铺 | `shopId=1`，103茶餐厅。 |
-
-### 工具日志
-
-| 工具 | 请求参数 | 工具自身耗时 | 状态 | 返回的实时事实 |
-| --- | --- | ---: | --- | --- |
-| `shopDetail` | `shopIds=[1]` | `4 ms` | 成功 | 评分 `3.7/5`、人均 `80 CNY`、地址和营业时间。 |
-| `voucherQuery` | `shopIds=[1]` | `3 ms` | 成功 | 两张当前可用代金券：支付 `47.50` 元抵扣 `50.00` 元；支付 `80.00` 元抵扣 `100.00` 元。 |
-| `blogSearch` | `shopIds=[1]` | `2 ms` | 成功 | 召回公开探店笔记，包括“人均30杭州这家港式茶餐厅我疯狂打call”等内容。 |
-
-`tool_ms=65 ms` 是工具选择、执行和日志持久化的整体耗时；三条工具日志中的 `4 + 3 + 2 ms` 是各个查询本身的耗时，两者统计范围不同。
-
-### SSE 及回答链路
+## 当前工作流
 
 ```text
-用户问题
-  -> 会话与用户消息持久化
-  -> Qdrant RAG 召回 shopId=1
-  -> 直接工具路由：shopDetail + voucherQuery + blogSearch
-  -> 保存 tb_ai_tool_log
-  -> 调用模型并 SSE 输出 message_start -> delta... -> message_end
-  -> 保存助手消息和 tb_ai_request_log(id=51)
+CHAT
+├── QUERY_PREPROCESS
+│   └── QUERY_REWRITE_MODEL × N
+├── QUERY_PLAN_RESOLVE
+├── RETRIEVAL
+│   ├── STRUCTURED_RETRIEVAL × task
+│   ├── EMBEDDING（仅 semanticPreference 非空）
+│   ├── QDRANT_SEARCH（仅 semanticPreference 非空）
+│   └── RESULT_MERGE
+├── AGENT_ROUTE
+│   └── TOOL_ROUTE → TOOL_CALL × N
+├── FINAL_MODEL
+├── SSE_STREAM
+└── MESSAGE_PERSIST
 ```
 
-其中 `5805 - 346 - 65 = 5394 ms` 的主要时间消耗发生在外部模型首 Token 返回阶段，不是本地 RAG 或数据库工具查询造成的。
+查询计划调用 OpenAI-Compatible `response_format: {"type":"json_object"}`，要求模型只输出
+一个 JSON 对象，并通过 `thinking.type=disabled` 关闭该阶段不必要的推理输出；规划器只
+校验 JSON 字段类型、枚举值、任务数量和长度边界，不再用原问题规则重新推断预算、类别或
+实时事实。Resolver 再将模型字段解析为数据库实体并执行检索安全检查。`TOOL_ROUTE`
+由 Java 按已解析的 `requiredFacts` 确定调用 `shopDetail`、`voucherQuery`、
+`blogSearch`、`nearbyShopSearch`，不会进行第二次模型工具规划。
 
-> 注：本次最初抓取到的原始工具日志把数据库中的“分”直接标成了 CNY。实现已修正为“分转元”后再提供给模型；正式事实以表格中的 `47.50/50.00` 和 `80.00/100.00` 元为准。
+## 候选与证据边界
 
-## Trace 2：朋友聚餐推荐
+- Qdrant 的店铺画像和探店笔记集合各预取最多 `10` 条，用于 Payload 过滤与按 `shopId` 去重。
+- 每个任务最多保留 `5` 家符合实体、排除店铺、类别、商圈和预算约束的候选；工具调用与 Prompt 证据按任务隔离。
+- 最终回答最多展示 `3` 家推荐店铺；剩余候选仅作为内部证据，不会混入其他任务。
 
-### 固定问题
+## 故障状态
 
-`推荐适合朋友聚餐、人均 200 的餐厅，并说明理由。`
+| 场景 | Trace 结果 | 下游行为 |
+| --- | --- | --- |
+| 指代不唯一、明确店铺超过 5 家、仅请求实时事实但无检索条件 | `CLARIFIED` | 直接 SSE 返回澄清，不调用检索、工具或最终模型。 |
+| 计划模型超时、返回非法 JSON 或重试耗尽 | `FAILED` / `QUERY_PREPROCESS` | 返回服务繁忙，不执行检索。 |
+| 实体、类别或商圈无法解析 | `CLARIFIED` / `QUERY_PLAN_RESOLVE` | 返回对应澄清。 |
+| Embedding 或 Qdrant 不可用 | 检索 Span 标记降级 | 保留 MySQL 硬条件候选，最终回答不宣称未验证的主观偏好。 |
+| 工具调用失败 | 对应 `TOOL_CALL` 失败 | 工具错误作为任务结果写入 Prompt，其余证据仍可回答。 |
 
-### 真实执行记录
+## 复核方式
 
-会话 ID：`14`。本次实际问题正文为“推荐适合朋友聚餐、人均 200 以内的餐厅，并说明理由”。用户在输入时附带了 Markdown 代码块前缀，但不影响意图识别和回答。
-
-最终请求日志：`tb_ai_request_log.id=53`，类型：`chat`，成功状态：`1`，完成时间：`2026-07-26 00:28:43`。
-
-| 维度 | 实际结果 |
-| --- | --- |
-| RAG 召回耗时 | `766 ms` |
-| 工具编排总耗时 | `29 ms` |
-| 首 Token 耗时 | `4084 ms` |
-| 总耗时 | `7313 ms` |
-| 输入 / 输出 Token | `1545 / 586` |
-| 是否生成 `agent_plan` | 否。问题包含“人均”，被识别为明确的店铺详情筛选，快速路径优先执行直接工具路由。 |
-| 实际工具 | `shopDetail(shopIds=[1, 3, 7])`，成功，工具自身耗时 `1 ms`。 |
-
-### 召回、工具与最终回答
-
-RAG 召回的候选店铺为 `1、3、7`。`shopDetail` 查询返回：
-
-1. `103茶餐厅`：评分 `3.7/5`，人均 `80` 元；
-2. `新白鹿餐厅(运河上街店)`：评分 `4.7/5`，人均 `61` 元；
-3. `炉鱼(拱墅万达广场店)`：评分 `4.7/5`，人均 `85` 元。
-
-最终助手消息为 `tb_ai_message.id=128`，状态 `1`。回答基于上述三家候选店的评分、人均、地址和营业时间给出聚餐推荐，三家均满足“不超过 200 元”的预算条件；同时说明了 103 茶餐厅已有的优惠券信息。
-
-```text
-用户问题
-  -> 会话与用户消息持久化（conversationId=14）
-  -> Qdrant RAG 召回 shopId=1、3、7
-  -> 明确筛选意图命中快速路径，跳过 agent_plan
-  -> shopDetail 实时查询并保存 tb_ai_tool_log(id=53)
-  -> 调用模型并 SSE 输出
-  -> 持久化助手消息(id=128) 和最终 chat 请求日志(id=53)
-```
-
-本例证明“有限步 Think-Execute”不是每轮强制规划：简单、可确定的查询优先使用直接工具路由控制时延；只有需要模型判断工具组合或任务结束条件的请求才进入 `agent_plan`。
-
-## 完成标准
-
-两条 Trace 均具备“用户问题 -> 检索或关键词 fallback -> 工具或规划 -> 工具日志 -> SSE 回答持久化 -> 请求日志指标”的可追溯证据后，才能在简历中表述为“可观测的 AI 导购链路”。
+使用 [ai-agent-trace-export.sql](ai-agent-trace-export.sql) 传入 `traceId`，可查询根
+Trace、全部 Span、模型请求日志和工具日志。Span 属性只保存阶段、数量、店铺 ID、Token
+和耗时，不保存完整用户 Prompt。

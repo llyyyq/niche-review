@@ -30,6 +30,8 @@ end
 redis.call("incrby", stockKey, -1)
 -- 3.4 Mark user as ordered
 redis.call("sadd", orderKey, userId)
--- 3.5 Keep an order-level marker for idempotent failure compensation.
-redis.call("set", reservationKey, voucherId .. ":" .. userId, "EX", 86400)
+-- 3.5 Keep the marker until the database order commits or compensation finishes.
+-- A durable dispatch outbox can retry longer than one day, so a fixed short TTL
+-- would make a later compensation ambiguous.
+redis.call("set", reservationKey, voucherId .. ":" .. userId)
 return 0
