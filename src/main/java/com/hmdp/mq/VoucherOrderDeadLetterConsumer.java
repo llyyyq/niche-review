@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit;
 
 import static com.hmdp.utils.MqConstants.VOUCHER_ORDER_DLQ_COMPENSATION_GROUP;
 import static com.hmdp.utils.MqConstants.VOUCHER_ORDER_DLQ_TOPIC;
-import static com.hmdp.utils.RedisConstants.ORDER_LOCK_KEY;
+import static com.hmdp.utils.RedisConstants.SECKILL_USER_LOCK_KEY;
 
 /**
  * Final safety net for messages that fail all normal order-consumption
@@ -56,7 +56,7 @@ public class VoucherOrderDeadLetterConsumer implements RocketMQListener<String> 
             return;
         }
 
-        RLock lock = redissonClient.getLock(ORDER_LOCK_KEY + voucherOrder.getUserId());
+        RLock lock = redissonClient.getLock(SECKILL_USER_LOCK_KEY + voucherOrder.getUserId());
         boolean locked = false;
         try {
             locked = lock.tryLock(1, TimeUnit.SECONDS);

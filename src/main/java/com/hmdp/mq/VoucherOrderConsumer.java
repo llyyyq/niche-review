@@ -16,6 +16,7 @@ import java.util.concurrent.TimeUnit;
 
 import static com.hmdp.utils.MqConstants.VOUCHER_ORDER_CONSUMER_GROUP;
 import static com.hmdp.utils.MqConstants.VOUCHER_ORDER_TOPIC;
+import static com.hmdp.utils.RedisConstants.SECKILL_USER_LOCK_KEY;
 
 @Slf4j
 @Component
@@ -43,7 +44,7 @@ public class VoucherOrderConsumer implements RocketMQListener<String> {
             return;
         }
 
-        RLock lock = redissonClient.getLock("order:" + userId);
+        RLock lock = redissonClient.getLock(SECKILL_USER_LOCK_KEY + userId);
         boolean isLock = false;
         try {
             isLock = lock.tryLock(1, TimeUnit.SECONDS);

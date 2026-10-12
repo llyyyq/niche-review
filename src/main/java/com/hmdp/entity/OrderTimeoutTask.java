@@ -15,6 +15,8 @@ public class OrderTimeoutTask {
     public static final int STATUS_PROCESSING = 1;
     public static final int STATUS_SENT = 2;
     public static final int STATUS_CANCELLED = 3;
+    /** Retries exhausted; needs manual intervention. */
+    public static final int STATUS_FAILED = 4;
 
     @TableId(value = "id", type = IdType.AUTO)
     private Long id;

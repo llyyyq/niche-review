@@ -5,18 +5,16 @@ import com.hmdp.dto.Result;
 import com.hmdp.entity.Voucher;
 import com.hmdp.mapper.VoucherMapper;
 import com.hmdp.entity.SeckillVoucher;
+import com.hmdp.service.ISeckillStockWarmupTaskService;
 import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherService;
 import com.hmdp.event.ShopKnowledgeChangedEvent;
 import org.springframework.context.ApplicationEventPublisher;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.Resource;
 import java.util.List;
-
-import static com.hmdp.utils.RedisConstants.SECKILL_STOCK_KEY;
 
 /**
  * <p>
@@ -32,7 +30,7 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     @Resource
     private ISeckillVoucherService seckillVoucherService;
     @Resource
-    private StringRedisTemplate stringRedisTemplate;
+    private ISeckillStockWarmupTaskService seckillStockWarmupTaskService;
     @Resource
     private ApplicationEventPublisher applicationEventPublisher;
 
@@ -61,17 +59,24 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     @Override
     @Transactional
     public void addSeckillVoucher(Voucher voucher) {
+        if (voucher.getStock() == null) {
+            throw new IllegalArgumentException("Seckill voucher stock is required");
+        }
         // 保存优惠券
-        save(voucher);
+        if (!save(voucher)) {
+            throw new IllegalStateException("Failed to save voucher");
+        }
         // 保存秒杀信息
         SeckillVoucher seckillVoucher = new SeckillVoucher();
         seckillVoucher.setVoucherId(voucher.getId());
         seckillVoucher.setStock(voucher.getStock());
         seckillVoucher.setBeginTime(voucher.getBeginTime());
         seckillVoucher.setEndTime(voucher.getEndTime());
-        seckillVoucherService.save(seckillVoucher);
-        // 保存秒杀库存到 Redis，供 seckill.lua 预扣库存使用
-        stringRedisTemplate.opsForValue().set(SECKILL_STOCK_KEY + voucher.getId(), voucher.getStock().toString());
+        if (!seckillVoucherService.save(seckillVoucher)) {
+            throw new IllegalStateException("Failed to save seckill voucher");
+        }
+        // 与券在同一事务中记录预热任务，由调度器异步写入 Redis 库存
+        seckillStockWarmupTaskService.createPendingTask(voucher.getId(), voucher.getStock());
         publishKnowledgeChanged(voucher.getShopId());
     }
 

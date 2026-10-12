@@ -28,6 +28,7 @@ public class OrderTimeoutTaskServiceImpl implements IOrderTimeoutTaskService {
     private static final int MAX_BACKOFF_SHIFT = 5;
     private static final long PROCESSING_TIMEOUT_SECONDS = 60L;
     private static final int MAX_ERROR_LENGTH = 512;
+    private static final int MAX_ATTEMPTS = 10;
 
     @Resource
     private OrderTimeoutTaskMapper orderTimeoutTaskMapper;
@@ -106,6 +107,12 @@ public class OrderTimeoutTaskServiceImpl implements IOrderTimeoutTaskService {
                         task.getId(), task.getOrderId(), attempt);
             }
         } catch (Exception e) {
+            if (attempt >= MAX_ATTEMPTS) {
+                orderTimeoutTaskMapper.markFailed(task.getId(), processingVersion, limitError(e.getMessage()));
+                log.error("Order timeout task exhausted retries, order was not auto-closed, manual intervention required, taskId={}, orderId={}, attempt={}",
+                        task.getId(), task.getOrderId(), attempt, e);
+                return;
+            }
             LocalDateTime nextRetryAt = LocalDateTime.now().plusSeconds(backoffSeconds(attempt));
             orderTimeoutTaskMapper.markPendingForRetry(task.getId(), processingVersion, nextRetryAt, limitError(e.getMessage()));
             log.warn("Order timeout task send failed and will retry, taskId={}, orderId={}, attempt={}, nextRetryAt={}",

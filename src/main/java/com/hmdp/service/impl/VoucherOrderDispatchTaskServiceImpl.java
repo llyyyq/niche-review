@@ -35,6 +35,7 @@ public class VoucherOrderDispatchTaskServiceImpl implements IVoucherOrderDispatc
     private static final int MAX_BACKOFF_SHIFT = 5;
     private static final long PROCESSING_TIMEOUT_SECONDS = 60L;
     private static final int MAX_ERROR_LENGTH = 512;
+    private static final int MAX_ATTEMPTS = 10;
 
     @Resource
     private VoucherOrderDispatchTaskMapper dispatchTaskMapper;
@@ -102,6 +103,12 @@ public class VoucherOrderDispatchTaskServiceImpl implements IVoucherOrderDispatc
             log.info("Voucher order dispatch task sent, taskId={}, orderId={}, attempt={}",
                     task.getId(), task.getOrderId(), attempt);
         } catch (Exception e) {
+            if (attempt >= MAX_ATTEMPTS) {
+                dispatchTaskMapper.markFailed(task.getId(), processingVersion, limitError(e.getMessage()));
+                log.error("Voucher order dispatch exhausted retries, manual intervention required, taskId={}, orderId={}, attempt={}",
+                        task.getId(), task.getOrderId(), attempt, e);
+                return;
+            }
             LocalDateTime nextRetryAt = LocalDateTime.now().plusSeconds(backoffSeconds(attempt));
             dispatchTaskMapper.markPendingForRetry(task.getId(), processingVersion, nextRetryAt, limitError(e.getMessage()));
             log.warn("Voucher order dispatch failed; delivery result may be unknown and will retry, taskId={}, orderId={}, attempt={}",
