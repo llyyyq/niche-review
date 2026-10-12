@@ -19,6 +19,8 @@ public class VoucherOrderDispatchTask {
     public static final int STATUS_SENT = 2;
     public static final int STATUS_COMPLETED = 3;
     public static final int STATUS_CANCELLED = 4;
+    /** Retries exhausted; needs manual intervention. */
+    public static final int STATUS_FAILED = 5;
 
     @TableId(value = "id", type = IdType.AUTO)
     private Long id;

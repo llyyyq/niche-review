@@ -142,7 +142,7 @@ public class AiQueryPlanPlanner {
             Exception attemptFailure = null;
             try {
                 output = aiChatModelClient.complete(messages, AiCompletionOptions.jsonObject(
-                        0D, positive(properties.getReadTimeoutMs(), 8000)));
+                        0D, positive(properties.getReadTimeoutMs(), AiQueryRewriteProperties.DEFAULT_READ_TIMEOUT_MS)));
                 AiQueryPlan parsed = parseModelOutput(output, original,
                         System.currentTimeMillis() - startedAt);
                 validateCategoryVocabulary(parsed, categoryCatalog);

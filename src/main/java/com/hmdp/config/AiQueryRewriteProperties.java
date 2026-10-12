@@ -21,5 +21,7 @@ public class AiQueryRewriteProperties {
 
     private Integer maxContextChars = 2400;
 
-    private Integer readTimeoutMs = 15000;
+    public static final int DEFAULT_READ_TIMEOUT_MS = 15000;
+
+    private Integer readTimeoutMs = DEFAULT_READ_TIMEOUT_MS;
 }

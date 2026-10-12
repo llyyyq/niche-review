@@ -38,4 +38,10 @@ public class RedisConstants {
      * 两个操作争同一把锁，保证只有一个能成功修改订单状态，解决并发写冲突。
      */
     public static final String ORDER_LOCK_KEY = "lock:order:";
+
+    /**
+     * 秒杀落库的用户级分布式锁 key。
+     * 正常消费者与死信补偿共用，保证同一用户的两条路径互斥。
+     */
+    public static final String SECKILL_USER_LOCK_KEY = "lock:seckill:user:";
 }
