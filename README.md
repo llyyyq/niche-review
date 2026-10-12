@@ -12,6 +12,7 @@
 - [接口与代码索引](#reference)
 - [验证材料清单](#evidence-index)
 - [项目边界](#boundaries)
+- [已知问题与后续计划](#known-issues)
 
 <a id="quick-start"></a>
 
@@ -77,6 +78,9 @@ mvn -q -Dtest=ReliabilityIntegrationTest test
 # AI Trace、结构化查询计划、检索与工具隔离测试
 mvn -q -Dtest="AiTraceCoreTest,AiQueryPlanPlannerTest,AiQueryPlanResolverTest,AiConversationQueryRewriteTest,ShopKnowledgeStructuredRetrievalTest,AiAgentStructuredRoutingTest,AiReadOnlyToolTraceTest,AiConversationEvidenceBudgetTest" test
 
+# 秒杀派单 outbox 与库存预热单元测试
+mvn -q -Dtest=SeckillStockWarmupTaskServiceImplTest test
+
 # 生成 JMeter 10,000 个用户 Token
 mvn -q -Dtest=HmDianPingApplicationTests#prepareJmeterTokens test
 ```
@@ -127,26 +131,32 @@ flowchart TD
 flowchart TD
     A["秒杀请求"] --> B["滑动窗口限流（5 req/s per user）"]
     B --> C["seckill.lua 原子执行\n库存校验 + 一人一单 + Redis 预扣"]
-    C --> D{"RocketMQ syncSend"}
-    D -- "失败" --> E["seckill_rollback.lua\n立即回滚 Redis 预扣"]
+    C -- "库存不足 / 重复下单" --> X["直接返回失败"]
+    C -- "预扣成功" --> D["写入派单 outbox\ntb_voucher_order_dispatch_task（PENDING）"]
+    D -- "写入失败" --> E["seckill_rollback.lua\n立即回滚 Redis 预扣"]
     D -- "成功" --> F["返回 orderId"]
-    F --> G["VoucherOrderConsumer\nRedisson 锁 + 幂等校验"]
-    G --> H["同事务：扣库存 + 保存订单 + 创建超时任务"]
-    H --> I{"消费结果"}
-    I -- "重试 5 次后仍失败" --> J["DLQ 消费者\n幂等补偿恢复库存"]
-    I -- "成功" --> K["确认消费"]
+    F --> G["派单调度器（每秒）\nCAS 抢占 → syncSend"]
+    G -- "发送失败或结果未知" --> H["指数退避，保留 Redis 预扣"]
+    H --> G
+    G -- "SEND_OK" --> I["标记 SENT"]
+    I --> J["VoucherOrderConsumer\n用户级锁 + 幂等校验"]
+    J --> K["同事务：扣库存 + 保存订单 + 创建超时任务 + 标记派单完成"]
+    K --> L["提交后删除预留标记"]
+    J -- "重试 5 次后仍失败" --> M["DLQ 消费者\n幂等补偿恢复 Redis 库存"]
 ```
 
 每一层的失败都有补偿路径：
 
 | 故障点 | 处理 | 一致性保证 |
 |---|---|---|
-| RocketMQ 发送失败 | 同步检查 `SendStatus`，失败立即 Lua 回滚 | 订单级幂等标记防止重复回滚 |
+| 派单任务写入失败 | 立即 Lua 回滚 Redis 预扣，返回“系统繁忙” | 回滚脚本按 orderId 去重 |
+| RocketMQ 发送失败或结果未知 | 调度器指数退避重试，保留 Redis 预扣 | 不立即回滚，避免与已投递的消息冲突 |
 | 消费失败（业务异常） | RocketMQ 重试 5 次 | 用户-优惠券联合唯一索引 |
-| 重试耗尽 | DLQ 消费者执行补偿 | 回滚脚本按 orderId 去重 |
+| 消费重试耗尽 | DLQ 消费者执行补偿 | 回滚脚本按 orderId 去重 |
+| 派单重试 10 次仍失败 | 任务置为 FAILED，预留保留，需人工处理 | 见[已知问题](#known-issues) |
 | 重复消费 | orderId 幂等 + DB 唯一约束 | 重复消息不重复扣库存 |
 
-**证据**：[秒杀压测](docs/project-proof/seckill-pressure-test.md) 使用 10,000 个不同用户令牌，在 30 秒 Ramp-Up 内发起 100 张券的抢购请求，平均吞吐约 **333 req/s**；订单数和唯一用户数均为 **100**，MySQL/Redis 库存均为 **0**（无超卖）。该吞吐是本次压测场景的平均值，不代表系统最大承载 QPS。[对账 SQL](docs/project-proof/seckill-verify.sql) 可独立核实。
+**证据**：[秒杀压测](docs/project-proof/seckill-pressure-test.md) 使用 10,000 个不同用户令牌，在 30 秒 Ramp-Up 内发起 100 张券的抢购请求，平均吞吐约 **333 req/s**；订单数和唯一用户数均为 **100**，MySQL/Redis 库存均为 **0**（无超卖）。该吞吐是本次压测场景的平均值，不代表系统最大承载 QPS。**注意**：该压测基于派单 outbox 改造之前的版本，改造后需要重新压测。[对账 SQL](docs/project-proof/seckill-verify.sql) 可独立核实。
 
 [↑ 回到导航](#nav)
 
@@ -288,11 +298,21 @@ flowchart TD
 2. **消费者恢复不可控**：Spring Data Redis 的 Stream 监听器异常处理不透明，重试行为依赖框架版本
 3. **延迟消息需自建**：关单需要 15 分钟延迟投递，Redis Streams 不支持，得另起一套定时轮询
 
-切到 RocketMQ 后：`syncSend` 返回 `SendStatus` 可立即判断发送成败；重试 5 次 + DLQ 形成完整兜底链；`syncSendDelayTimeMills` 原生支持毫秒级延迟消息。
+切到 RocketMQ 后：派单由 outbox 调度器调用 `syncSend`，通过 `SendStatus` 判断发送结果；发送失败进入退避重试，而不是立即回滚预留；消费者重试 5 次 + DLQ 形成兜底链；延迟消息使用 `syncSendDelayTimeMills`。
 
 ### 为什么关单用 DB 任务表而不是纯延迟消息
 
 RocketMQ 延迟消息本身没有持久化“这个关单任务已创建”的业务记录。单独依赖延迟消息时，发送结果未知或 Broker 异常后缺少可靠的补投和对账依据。任务表存在 MySQL 里并与订单同事务落库——只要订单创建成功，关单任务就具备可扫描、可重试的记录。
+
+### 为什么库存预热也用 outbox
+
+券的库存需要同时写入 MySQL 和 Redis，但两者不能放进同一个事务。三种做法各有问题：
+
+- **事务内写 Redis**：Redis 写入成功后，如果事务之后回滚，Redis 里会残留一张数据库中不存在的券的库存。
+- **事务提交后写 Redis**：Redis 写入失败时，数据库里已经有券，但抢购返回“库存不足”，没有任何报错。
+- **outbox（当前方案）**：预热任务与券在同一事务中落库，调度器用 `SET NX` 写入 Redis，失败按退避重试，最多 10 次。`SET NX` 保证重试时不会覆盖已经被抢购扣减的库存。
+
+代价是券创建后有一段短暂的空窗期，抢购会返回“库存不足”，这一点已写入[已知问题](#known-issues)。
 
 ### 为什么 Agent maxSteps 设为 1
 
@@ -325,7 +345,7 @@ RocketMQ 延迟消息本身没有持久化“这个关单任务已创建”的�
 | 模块 | 文件 |
 |---|---|
 | 店铺缓存 | [`ShopServiceImpl`](src/main/java/com/hmdp/service/impl/ShopServiceImpl.java) · [`SimpleRedisLock`](src/main/java/com/hmdp/utils/SimpleRedisLock.java) · [`unlock.lua`](src/main/resources/unlock.lua) |
-| 秒杀下单 | [`VoucherOrderServiceImpl`](src/main/java/com/hmdp/service/impl/VoucherOrderServiceImpl.java) · [`VoucherOrderConsumer`](src/main/java/com/hmdp/mq/VoucherOrderConsumer.java) · [`VoucherOrderDeadLetterConsumer`](src/main/java/com/hmdp/mq/VoucherOrderDeadLetterConsumer.java) · [`seckill.lua`](src/main/resources/seckill.lua) · [`seckill_rollback.lua`](src/main/resources/seckill_rollback.lua) |
+| 秒杀下单 | [`VoucherOrderServiceImpl`](src/main/java/com/hmdp/service/impl/VoucherOrderServiceImpl.java) · [`VoucherOrderConsumer`](src/main/java/com/hmdp/mq/VoucherOrderConsumer.java) · [`VoucherOrderDeadLetterConsumer`](src/main/java/com/hmdp/mq/VoucherOrderDeadLetterConsumer.java) · [`seckill.lua`](src/main/resources/seckill.lua) · [`seckill_rollback.lua`](src/main/resources/seckill_rollback.lua) · [`VoucherOrderDispatchTaskServiceImpl`](src/main/java/com/hmdp/service/impl/VoucherOrderDispatchTaskServiceImpl.java) · [`SeckillStockWarmupTaskServiceImpl`](src/main/java/com/hmdp/service/impl/SeckillStockWarmupTaskServiceImpl.java) |
 | 关单 & 支付 | [`OrderTimeoutTaskServiceImpl`](src/main/java/com/hmdp/service/impl/OrderTimeoutTaskServiceImpl.java) · [`OrderTimeoutListener`](src/main/java/com/hmdp/mq/OrderTimeoutListener.java) · [`PaymentServiceImpl`](src/main/java/com/hmdp/service/impl/PaymentServiceImpl.java) |
 | RAG 检索 | [`ShopKnowledgeServiceImpl`](src/main/java/com/hmdp/service/impl/ShopKnowledgeServiceImpl.java) · [`QdrantKnowledgeClient`](src/main/java/com/hmdp/ai/QdrantKnowledgeClient.java) |
 | 查询计划 | [`AiQueryPlanPlanner`](src/main/java/com/hmdp/ai/AiQueryPlanPlanner.java) · [`AiQueryPlanResolver`](src/main/java/com/hmdp/ai/AiQueryPlanResolver.java) |
@@ -341,7 +361,7 @@ RocketMQ 延迟消息本身没有持久化“这个关单任务已创建”的�
 
 | 验证项 | 文档 | 结论 |
 |---|---|---|
-| 秒杀压测 | [`seckill-pressure-test.md`](docs/project-proof/seckill-pressure-test.md) | 333 req/s，无超卖 |
+| 秒杀压测 | [`seckill-pressure-test.md`](docs/project-proof/seckill-pressure-test.md) | 333 req/s，无超卖（改造前版本，待重测） |
 | 秒杀对账 SQL | [`seckill-verify.sql`](docs/project-proof/seckill-verify.sql) | 独立验证 SQL |
 | 可靠性验证 | [`reliability-verification.md`](docs/project-proof/reliability-verification.md) | 3/3 通过 |
 | 支付关单竞争 | [`payment-timeout-race.md`](docs/project-proof/payment-timeout-race.md) | 支付/关单/重复消息全覆盖 |
@@ -360,5 +380,25 @@ RocketMQ 延迟消息本身没有持久化“这个关单任务已创建”的�
 - 知识同步任务在业务提交后异步创建；提交到任务落库之间存在极小进程崩溃窗口
 - 项目面向本地生活场景设计，秒杀和关单的库存模型不适用于多 SKU / 购物车场景
 - AI 服务默认 `mock`/`disabled`，不配置外部 API 也能跑通全部业务功能
+
+[↑ 回到导航](#nav)
+
+<a id="known-issues"></a>
+
+## 已知问题与后续计划
+
+以下问题已在代码中确认，尚未修复：
+
+- **重试耗尽后需要人工介入**：派单、超时关单和库存预热任务重试 10 次（约 26 分钟）后进入 FAILED 状态。目前只记录 ERROR 日志，没有告警，也没有自动补偿。
+  - 派单 FAILED：Redis 预留保留，该用户无法再次抢购，库存被占用
+  - 超时关单 FAILED：订单保持未支付，不会自动关闭，库存不回补
+  - 预热 FAILED：该券在 Redis 中保持售罄
+- **库存预热存在短暂空窗**：券创建后，到调度器写入 Redis 之间（通常约 1 秒，重试时更长），抢购会返回“库存不足”。
+- **支付为模拟实现**：`/payment/simulate` 没有环境隔离，回调也没有验签，只用于演示关单场景，不能直接用于真实支付。
+- **AI 知识库重建不是原子操作**：重建时先删除 Qdrant collection 再逐批写入，中途失败会留下残缺索引。计划改为写入临时 collection，完成后再切换。
+- **店铺 ID 回退需要核实**：Qdrant 检索结果的 payload 缺少 `shopId` 时，会回退为点 ID，可能被误认为店铺 ID。需要确认所有写入路径都携带 `shopId`。
+- **延迟消息需要确认 Broker 版本**：`syncSendDelayTimeMills` 的毫秒级延迟投递依赖 Broker 支持，README 中尚未记录 Broker 版本要求。
+- **评测代码位置不合理**：`RagConversationEvaluationRunner` 位于 `src/main`，计划迁入 `src/test`，避免误开配置时在启动阶段调用模型。
+- **秒杀压测需要重测**：当前压测数据基于派单 outbox 改造之前的版本。
 
 [↑ 回到导航](#nav)
